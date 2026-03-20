@@ -1,12 +1,12 @@
 # NCAA March Madness Prediction System
 
-**Author:** Roddy
+**Author:** Roddy， Yumeng 
 **Timeline:** 2026-03 ~ 2026-05 (1.5 months)
 **Target:** Kaggle March ML Mania 2027 + Kalshi Live Trading
 
 ## Project Overview
 
-A probabilistic NCAA tournament prediction system combining mixture models, gradient boosting, and deep learning sequence models. Built on 12 years of Kaggle competition data + external rating systems (KenPom, Barttorvik, Massey). Extends prior work on NBA CW-RAPM and volatility regime detection from `~/sports_project/`.
+A probabilistic NCAA tournament prediction system combining mixture models, gradient boosting, and deep learning sequence models. Built on 12 years of Kaggle competition data + external rating systems (KenPom, Barttorvik, Massey).
 
 ## Directory Structure
 
