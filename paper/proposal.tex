@@ -1,0 +1,376 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Proposal}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Mixture-of-Experts, Temporal Modeling, and Prediction Market Trading}
+}
+\author{
+    Roddy Huang\\
+    Cornell University\\
+    \texttt{roddy@cornell.edu}
+}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+% ══════════════════════════════════════════════════════════════════════════
+\begin{abstract}
+We propose a probabilistic prediction system for the NCAA Men's Basketball Tournament (``March Madness''), targeting both the Kaggle \emph{March Machine Learning Mania} competition (2027 edition) and live trading on the Kalshi prediction market. Our approach combines three methodological innovations over standard baselines: (1)~a \textbf{Mixture-of-Experts} architecture that routes matchups to specialized sub-models by game type, (2)~a \textbf{Transformer sequence model} that encodes a team's full-season trajectory into a dense embedding, and (3)~a \textbf{market-calibrated ensemble} that fuses model predictions with betting market prices via Bayesian updating. We backtest on 12 years of tournament data (2014--2026, $\sim$756 games) using leave-one-tournament-out cross-validation, targeting a Brier score below 0.170 (vs.\ $\sim$0.200 seed baseline and $\sim$0.175 Vegas benchmark).
+\end{abstract}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+
+The NCAA Division~I Men's Basketball Tournament is a 68-team, single-elimination event producing 63 games over three weeks each March. Its high variance---driven by single-elimination format, large talent gaps, and emotional intensity---makes it a canonical testbed for probabilistic prediction.
+
+The Kaggle \emph{March Machine Learning Mania} competition, running annually since 2014 with a \$50{,}000 prize pool, asks participants to submit $P(\text{Team}_i \text{ beats Team}_j)$ for every possible matchup, scored by Brier score:
+\begin{equation}
+    \text{BS} = \frac{1}{N}\sum_{i=1}^{N}(p_i - o_i)^2
+    \label{eq:brier}
+\end{equation}
+where $p_i$ is the predicted probability and $o_i \in \{0,1\}$ is the outcome. Lower is better.
+
+A key empirical finding from 12 years of competition: \textbf{simple models with strong features consistently outperform complex ML}. Most winners use logistic regression or Elo with KenPom efficiency ratings~\citep{pomeroy2004}. The notable exception is \citet{landgraf2017}, who won by modeling competitors' submissions (meta-prediction) rather than improving game-level prediction.
+
+This project aims to push the prediction frontier through structured model heterogeneity (Mixture-of-Experts), temporal context (Transformer), and market integration (Kalshi), while respecting the fundamental constraint that 63 games per tournament provide very limited signal.
+
+\subsection{Connection to Prior Work}
+
+This project extends our prior NBA analytics research in \texttt{sports\_project/}:
+\begin{itemize}[nosep]
+    \item \textbf{Context-Weighted RAPM} (CW-RAPM): 1.9\% RMSE improvement over standard RAPM via stint-level quality weighting~--- analogous context-weighting applies to college basketball ratings
+    \item \textbf{Volatility regime detection}: Our 6-factor model with novel Volatility Factor and HMM regime switches transfers to modeling tournament vs.\ regular-season dynamics
+    \item \textbf{Championship prediction}: AUC $\sim$0.78 on 20-year NBA data using bench depth, rotation entropy, and stagger index
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Datasets}
+
+\subsection{Primary: Kaggle March ML Mania (2014--2026)}
+
+Twelve years of structured competition data comprising $\sim$35 CSVs per edition. Table~\ref{tab:kaggle-data} summarizes the core files.
+
+\begin{table}[h]
+\centering
+\caption{Core Kaggle dataset files (M = Men's, W = Women's prefix).}
+\label{tab:kaggle-data}
+\small
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+\textbf{File} & \textbf{Description} \\
+\midrule
+\texttt{MRegularSeasonDetailedResults} & Box scores: FGM/A, 3PM/A, FTM/A, OR, DR, Ast, TO, Stl, Blk, PF \\
+\texttt{MNCAATourneyDetailedResults} & Tournament game box scores (same schema) \\
+\texttt{MNCAATourneySeeds} & Seedings W01--Z16 per season \\
+\texttt{MMasseyOrdinals} & Daily rankings from 100+ systems (KenPom, Sagarin, BPI, RPI, \ldots) \\
+\texttt{MNCAATourneySlots} & Bracket structure mapping \\
+\texttt{MGameCities} & Game locations (travel distance features) \\
+\texttt{MTeamCoaches} & Coaching tenure and tournament experience \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The competition has evolved through four eras (Table~\ref{tab:kaggle-history}), with 24 total competition instances across community, Google Cloud--sponsored, and variant-scoring formats.
+
+\begin{table}[h]
+\centering
+\caption{Kaggle NCAA competition history.}
+\label{tab:kaggle-history}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Era} & \textbf{Years} & \textbf{Sponsor} & \textbf{Format} \\
+\midrule
+Community & 2014--2017 & Kaggle & Unified, Log Loss \\
+Google Cloud & 2018--2020 & Google Cloud + NCAA & M/W split + Analytics track \\
+Return & 2021--2022 & Kaggle & M/W split + Spread variant \\
+Unified & 2023--2026 & Kaggle (\$50K) & Combined M+W, Brier Score \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{External Rating Systems}
+
+\begin{table}[h]
+\centering
+\caption{External data sources for feature engineering.}
+\label{tab:external-data}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Source} & \textbf{Key Metrics} & \textbf{Cost} & \textbf{Access} \\
+\midrule
+KenPom & AdjO, AdjD, AdjEM, AdjT, Luck, SOS & \$24.95/yr & \texttt{kenpompy} \\
+Barttorvik & T-Rank, Barthag, adj.\ efficiency & Free & Web scraping \\
+Massey Ratings & 100+ system composite & Free & In Kaggle CSV \\
+EvanMiya & BPR (Bayesian Performance Rating) & \$29.99/mo & Subscription \\
+Sports Reference & Complete historical box scores & Free & \texttt{sports-reference.com/cbb/} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{BigQuery Public Dataset}
+
+Google's \texttt{bigquery-public-data.ncaa\_basketball} dataset provides play-by-play data for every D1 game since 2009 ($>$40M plays), accessible via the free BigQuery tier.
+
+\subsection{Prediction Markets}
+
+\begin{table}[h]
+\centering
+\caption{Prediction market platforms.}
+\label{tab:markets}
+\small
+\begin{tabular}{@{}lllp{5.5cm}@{}}
+\toprule
+\textbf{Platform} & \textbf{Maker Fee} & \textbf{API} & \textbf{Markets} \\
+\midrule
+Kalshi & 0\% & \texttt{docs.kalshi.com} & Championship, regional, game-by-game, props \\
+Polymarket & Rebates & \texttt{py-clob-client} & 450+ NCAA markets (non-US only) \\
+DraftKings & --- & Odds API & Spreads, totals, moneylines \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Key market makers: SIG/Nellie Analytics (Kalshi's first institutional MM), DRW (``Information Finance'' desk), Jump Trading (equity stake in Kalshi), Jane Street (dedicated sports quant team).
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Methodology}
+
+\subsection{Feature Engineering}
+
+We construct features in four layers of increasing sophistication:
+
+\paragraph{Layer 1: Static Team Ratings.}
+Pre-tournament snapshots of KenPom AdjEM, Barttorvik T-Rank, Massey composite rank, seed number, and conference strength (avg.\ conference AdjEM).
+
+\paragraph{Layer 2: Matchup Features.}
+For each pair $(A, B)$: seed difference $\Delta s$, rating differences $\Delta r_{\text{POM}}, \Delta r_{\text{SAG}}, \Delta r_{\text{MOR}}$, tempo mismatch $|T_A - T_B|$, offensive--defensive style clash ($O_A$ vs.\ $D_B$), geographic distance to game site, and coach tournament experience.
+
+\paragraph{Layer 3: Temporal / Momentum.}
+Rolling 10-game win percentage, average margin, late-season rating trend ($\Delta r$ over last 30 days), and conference tournament momentum.
+
+\paragraph{Layer 4: Market.}
+Market-implied probability from Kalshi/Vegas, model--market disagreement signal $|p_{\text{model}} - p_{\text{market}}|$.
+
+\subsection{Model Architecture}
+
+We employ a three-tier model hierarchy (Figure~\ref{fig:architecture} conceptual).
+
+\subsubsection{Tier 1: Baselines}
+
+\begin{enumerate}[nosep]
+    \item \textbf{Seed Logistic}: $P(A \text{ wins}) = \sigma(\beta_0 + \beta_1 \cdot \Delta s)$ --- the simplest meaningful model
+    \item \textbf{Elo Ratings}: Season-long Elo with tuned $K$-factor, home-court advantage, and inter-season regression
+    \item \textbf{KenPom Logistic}: Logistic regression on AdjEM difference --- the standard strong baseline
+\end{enumerate}
+
+\subsubsection{Tier 2: Advanced Models}
+
+\begin{enumerate}[nosep, start=4]
+    \item \textbf{Gradient Boosting} (XGBoost/LightGBM): Full feature set with walk-forward cross-validation. Expected to be the strongest single model based on competition history.
+
+    \item \textbf{Mixture-of-Experts (MoE)}: The core methodological contribution. A gating network $g(\mathbf{x})$ classifies each matchup into $K$ game types, and specialized expert models $f_k(\mathbf{x})$ handle each:
+    \begin{equation}
+        P(A \text{ wins} \mid \mathbf{x}) = \sum_{k=1}^{K} g_k(\mathbf{x}) \cdot f_k(\mathbf{x})
+        \label{eq:moe}
+    \end{equation}
+    Trained via EM: alternate between soft cluster assignment and expert parameter updates. Hypothesized game types:
+    \begin{itemize}[nosep]
+        \item \emph{Chalk} (1--4 vs.\ 13--16): High-seed dominance, rare upsets
+        \item \emph{Competitive} (5--8 vs.\ 9--12): Upset-prone, seed provides weak signal
+        \item \emph{Toss-up} (close seeds): Near coin-flip, momentum/matchup matters
+        \item \emph{Cinderella} (mid-major vs.\ power): Conference mismatch dynamics
+    \end{itemize}
+
+    \item \textbf{Transformer Sequence Model}: Encode each team's season as a sequence of game embeddings:
+    \begin{equation}
+        \mathbf{h}_{\text{team}} = \text{TransformerEncoder}(\mathbf{e}_1, \mathbf{e}_2, \ldots, \mathbf{e}_T)[\texttt{CLS}]
+    \end{equation}
+    where $\mathbf{e}_t$ encodes game $t$'s opponent rating, margin, location, and box score. Matchup prediction via MLP on $[\mathbf{h}_A ; \mathbf{h}_B]$. Architecture: 4 layers, 64-dim, 4 heads. Pretrained on regular-season games, fine-tuned on tournament outcomes.
+\end{enumerate}
+
+\subsubsection{Tier 3: Meta-Models}
+
+\begin{enumerate}[nosep, start=7]
+    \item \textbf{Weighted Ensemble}: $\hat{p} = \sum_m w_m \hat{p}_m$, weights $\{w_m\}$ optimized on holdout Brier score via constrained optimization ($w_m \geq 0$, $\sum w_m = 1$).
+
+    \item \textbf{Market-Calibrated Ensemble}: Bayesian update of ensemble prediction $\hat{p}$ with market-implied probability $p_{\text{mkt}}$:
+    \begin{equation}
+        p_{\text{final}} = \frac{\hat{p}^{\alpha} \cdot p_{\text{mkt}}^{1-\alpha}}{\hat{p}^{\alpha} \cdot p_{\text{mkt}}^{1-\alpha} + (1-\hat{p})^{\alpha} \cdot (1-p_{\text{mkt}})^{1-\alpha}}
+    \end{equation}
+    where $\alpha \in [0,1]$ controls trust in model vs.\ market (tuned on backtest).
+
+    \item \textbf{Portfolio Optimizer} (Kaggle-specific): Generate $N$ bracket portfolios maximizing $P(\text{top-}K \text{ finish})$ given ensemble probabilities and estimated competitor distribution~\citep{landgraf2017}.
+\end{enumerate}
+
+\subsection{Kalshi Trading Strategy}
+
+\begin{itemize}[nosep]
+    \item \textbf{Signal}: Trade when $|p_{\text{model}} - p_{\text{market}}| > \tau$ (threshold tuned on backtest)
+    \item \textbf{Sizing}: Fractional Kelly criterion ($f = 0.25 \cdot f^*_{\text{Kelly}}$) for bankroll safety
+    \item \textbf{Execution}: Limit orders via Kalshi REST API (0\% maker fee)
+    \item \textbf{Risk}: Max 5\% bankroll per game, max 20\% total exposure
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Evaluation}
+
+\subsection{Backtest Protocol}
+
+Leave-one-tournament-out (LOTO) cross-validation on 12 tournaments (2014--2026). For each holdout season $s$:
+\begin{enumerate}[nosep]
+    \item Train on all seasons $\neq s$ (regular season + tournament)
+    \item Predict all tournament matchups in season $s$
+    \item Compute Brier score on $\sim$63 games
+\end{enumerate}
+Report mean $\pm$ std Brier across 12 folds.
+
+\subsection{Benchmarks}
+
+\begin{table}[h]
+\centering
+\caption{Target Brier score benchmarks.}
+\label{tab:benchmarks}
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Model} & \textbf{Brier Score} \\
+\midrule
+Coin flip (0.5 for all) & 0.250 \\
+Seed baseline & $\sim$0.200 \\
+KenPom logistic & $\sim$0.185 \\
+Vegas line & $\sim$0.175 \\
+\textbf{Our target} & $<$\textbf{0.170} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Calibration}
+
+We evaluate calibration via reliability diagrams: bin predictions by decile and compare predicted probability to observed win frequency. A well-calibrated model should lie on the $y = x$ diagonal.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Timeline}
+
+\begin{table}[h]
+\centering
+\caption{Project timeline (6 weeks, March 20 -- May 1, 2026).}
+\label{tab:timeline}
+\begin{tabular}{@{}clp{8cm}@{}}
+\toprule
+\textbf{Week} & \textbf{Date} & \textbf{Deliverable} \\
+\midrule
+1--2 & Mar 20 -- Apr 3 & Data pipeline, EDA notebook, feature matrix \\
+2--3 & Apr 3 -- Apr 10 & Baseline models (Elo, Logistic, XGBoost), LOTO backtest \\
+3--4 & Apr 10 -- Apr 17 & MoE implementation + Transformer sequence model \\
+4--5 & Apr 17 -- Apr 24 & Full 12-year backtest, ensemble optimization \\
+5--6 & Apr 24 -- May 1 & Kalshi API integration, paper draft, Kaggle 2027 pipeline \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Risk Assessment}
+
+\begin{table}[h]
+\centering
+\caption{Key risks and mitigations.}
+\label{tab:risks}
+\begin{tabular}{@{}p{4cm}p{2cm}p{6.5cm}@{}}
+\toprule
+\textbf{Risk} & \textbf{Impact} & \textbf{Mitigation} \\
+\midrule
+63 games insufficient for DL & High & Heavy regularization; pretrain on regular season ($\sim$5{,}000 games/yr) \\
+KenPom paywall changes & Medium & Barttorvik (free) as primary fallback \\
+Kalshi regulatory shutdown & Medium & Backtest-only mode; DraftKings as alternative \\
+Simple models dominate & Medium & Always benchmark; value is in MoE insight, not raw Brier \\
+Single-tournament luck & High & Evaluate on 12-year LOTO, not single tournament \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Jacobs et~al.(1991)]{jacobs1991}
+Jacobs, R.~A., Jordan, M.~I., Nowlan, S.~J., and Hinton, G.~E.
+\newblock Adaptive Mixtures of Local Experts.
+\newblock \emph{Neural Computation}, 3(1):79--87, 1991.
+
+\bibitem[Landgraf(2017)]{landgraf2017}
+Landgraf, A.
+\newblock March ML Mania 1st Place Solution: Meta-Prediction Strategy.
+\newblock Kaggle Winner Interview, 2017.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Sill(2010)]{sill2010}
+Sill, J.
+\newblock Improved NBA Adjusted +/- Using Regularization and Out-of-Sample Testing.
+\newblock \emph{MIT Sloan Sports Analytics Conference}, 2010.
+
+\bibitem[Sokol et~al.(2020)]{sokol2020}
+Sokol, J., Jank, W., and Harp, S.
+\newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
+\newblock Georgia Institute of Technology, 2006--2026.
+
+\bibitem[Stern(1994)]{stern1994}
+Stern, H.~S.
+\newblock A Brownian Motion Model for the Progress of Sports Scores.
+\newblock \emph{Journal of the American Statistical Association}, 89(427):1128--1134, 1994.
+
+\bibitem[Vaswani et~al.(2017)]{vaswani2017}
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.~N., Kaiser, L., and Polosukhin, I.
+\newblock Attention Is All You Need.
+\newblock \emph{Advances in Neural Information Processing Systems}, 30, 2017.
+
+\end{thebibliography}
+
+\end{document}
