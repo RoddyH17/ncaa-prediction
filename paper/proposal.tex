@@ -46,9 +46,8 @@
     {\large Mixture-of-Experts, Temporal Modeling, and Prediction Market Trading}
 }
 \author{
-    Roddy Huang\\
+    Roddy Huang, Yumeng Jin \\
     Cornell University\\
-    \texttt{roddy@cornell.edu}
 }
 \date{March 2026}
 
@@ -75,16 +74,8 @@ where $p_i$ is the predicted probability and $o_i \in \{0,1\}$ is the outcome. L
 
 A key empirical finding from 12 years of competition: \textbf{simple models with strong features consistently outperform complex ML}. Most winners use logistic regression or Elo with KenPom efficiency ratings~\citep{pomeroy2004}. The notable exception is \citet{landgraf2017}, who won by modeling competitors' submissions (meta-prediction) rather than improving game-level prediction.
 
-This project aims to push the prediction frontier through structured model heterogeneity (Mixture-of-Experts), temporal context (Transformer), and market integration (Kalshi), while respecting the fundamental constraint that 63 games per tournament provide very limited signal.
+This project aims to push the prediction frontier through structured model \textbf{heterogeneity, Transformer, Computer Vision, and market integration}, while respecting the fundamental constraint that 63 games per tournament provide very limited signal.
 
-\subsection{Connection to Prior Work}
-
-This project extends our prior NBA analytics research in \texttt{sports\_project/}:
-\begin{itemize}[nosep]
-    \item \textbf{Context-Weighted RAPM} (CW-RAPM): 1.9\% RMSE improvement over standard RAPM via stint-level quality weighting~--- analogous context-weighting applies to college basketball ratings
-    \item \textbf{Volatility regime detection}: Our 6-factor model with novel Volatility Factor and HMM regime switches transfers to modeling tournament vs.\ regular-season dynamics
-    \item \textbf{Championship prediction}: AUC $\sim$0.78 on 20-year NBA data using bench depth, rotation entropy, and stagger index
-\end{itemize}
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Datasets}
@@ -287,9 +278,7 @@ Vegas line & $\sim$0.175 \\
 \end{tabular}
 \end{table}
 
-\subsection{Calibration}
-
-We evaluate calibration via reliability diagrams: bin predictions by decile and compare predicted probability to observed win frequency. A well-calibrated model should lie on the $y = x$ diagonal.
+\newpage
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Timeline}
@@ -351,25 +340,11 @@ Pomeroy, K.
 \newblock KenPom.com: College Basketball Ratings.
 \newblock \url{https://kenpom.com}, 2004--present.
 
-\bibitem[Sill(2010)]{sill2010}
-Sill, J.
-\newblock Improved NBA Adjusted +/- Using Regularization and Out-of-Sample Testing.
-\newblock \emph{MIT Sloan Sports Analytics Conference}, 2010.
 
 \bibitem[Sokol et~al.(2020)]{sokol2020}
 Sokol, J., Jank, W., and Harp, S.
 \newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
 \newblock Georgia Institute of Technology, 2006--2026.
-
-\bibitem[Stern(1994)]{stern1994}
-Stern, H.~S.
-\newblock A Brownian Motion Model for the Progress of Sports Scores.
-\newblock \emph{Journal of the American Statistical Association}, 89(427):1128--1134, 1994.
-
-\bibitem[Vaswani et~al.(2017)]{vaswani2017}
-Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.~N., Kaiser, L., and Polosukhin, I.
-\newblock Attention Is All You Need.
-\newblock \emph{Advances in Neural Information Processing Systems}, 30, 2017.
 
 \end{thebibliography}
 
