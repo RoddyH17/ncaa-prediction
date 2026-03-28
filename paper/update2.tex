@@ -1,0 +1,207 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#2}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#2: Model Development \& Backtest Results}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{March 28, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Overview}
+
+This report covers Weeks 2--4 (March 27 through April 10). We implemented eight prediction models spanning three tiers of complexity, expanded the feature set with box-score-derived efficiency metrics and Dean Oliver's Four Factors, and ran leave-one-tournament-out (LOTO) backtests across 11 seasons (2014--2025, excluding 2020). The headline result is sobering: a single-feature logistic regression on KenPom rank difference (Brier 0.196) ties or beats every more complex model we built. The rest of this report is about why that happened and what we learned from it.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Models}
+
+We implemented eight models, loosely following the three-tier hierarchy from the proposal.
+
+\subsection{Tier 1: Baselines}
+
+\paragraph{Seed Logistic.} $P(A \text{ wins}) = \sigma(\beta_0 + \beta_1 \Delta s)$ where $\Delta s$ is the seed difference. This is the simplest possible model. It got 0.199 Brier, right where the literature says it should be.
+
+\paragraph{KenPom Logistic.} Same form but on POM rank difference instead of seed. 0.196 Brier. Only 0.003 better than seed, which tells you something about how much information the ordinal rank adds over the seed line.
+
+\paragraph{Elo.} Season-long Elo with $K = 20$, home-court advantage of 100 Elo points, and 60\% regression to the mean between seasons. We replay every regular-season game chronologically to build ratings, then use the end-of-season ratings to predict tournament matchups. 0.221 Brier. We did not tune the hyperparameters, which partly explains the poor showing.
+
+\paragraph{Efficiency Logistic.} Logistic regression on our self-computed net efficiency difference (described in Section~3). 0.225 Brier. Worse than POM rank, which surprised us.
+
+\subsection{Tier 2: Advanced}
+
+\paragraph{XGBoost.} Gradient-boosted trees on the full 53-feature set, 300 estimators, max depth 4. XGBoost handles missing values natively, so we feed it everything including the poll-based rankings with 50\% missingness. 0.214 Brier. Worse than logistic regression on a single feature.
+
+\paragraph{Multi-Feature Logistic.} Logistic regression with StandardScaler on 16 selected features: seed, POM rank, net efficiency, all four offensive and four defensive Four Factors, tempo, and momentum. The idea was to combine the best continuous features while keeping the model simple enough not to overfit. 0.197 Brier. Essentially tied with KenPom Logistic.
+
+\paragraph{Mixture of Experts (K=4).} A gating network routes each matchup to one of four specialized logistic regression experts, initialized by seed gap: Chalk ($|\Delta s| \geq 8$), Competitive ($4 \leq |\Delta s| < 8$), Toss-up ($|\Delta s| < 4$), and a catch-all. Trained via EM with 10 iterations. Our first implementation scored 0.257, worse than a coin flip on some seasons. The problem turned out to be missing feature scaling: rank differences range from $-250$ to $+250$ while momentum features are on $[0, 1]$, and LBFGS cannot converge when the gradient is dominated by a single feature. Adding StandardScaler brought it to 0.209. Still not competitive with the baselines, but at least it's a real model now.
+
+\paragraph{Transformer (4-layer).} Each team's regular season is encoded as a sequence of 13-dimensional game embeddings (opponent rank, margin, location, FG\%, 3P\%, FT\%, rebound rate, assists, turnovers, steals, blocks, win indicator, day). A 4-layer Transformer encoder with 64-dim embeddings and 4 attention heads produces a team embedding from the CLS token. Matchup prediction is an MLP on the concatenated team embeddings. We trained directly on tournament games without pretraining on regular-season data. 0.245 Brier. We expected this: 736 tournament games cannot support a model with this many parameters.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Feature Improvements}
+
+We added two groups of continuous features beyond the ordinal ranks and momentum from Update~\#1.
+
+\subsection{Four Factors}
+
+Dean Oliver's Four Factors~\citep{oliver2004} are widely used in basketball analytics to decompose team performance into four axes. From regular-season box scores, we compute season averages for each team:
+\begin{align}
+\text{eFG\%} &= \frac{\text{FGM} + 0.5 \times \text{FGM3}}{\text{FGA}} \\
+\text{TO\%} &= \frac{\text{TO}}{\text{FGA} + 0.44 \times \text{FTA} + \text{TO}} \\
+\text{OR\%} &= \frac{\text{OR}}{\text{OR} + \text{Opp DR}} \\
+\text{FT Rate} &= \frac{\text{FTM}}{\text{FGA}}
+\end{align}
+
+We compute both offensive and defensive (opponent) versions, giving 8 per-team features and 8 difference features per matchup. These are all continuous values in $[0, 1]$ with no missing data, which is a real advantage over the poll-based rankings.
+
+\subsection{Tempo-adjusted efficiency}
+
+We also built our own version of KenPom-style efficiency ratings from box scores. Possessions are estimated as $\text{FGA} - \text{OR} + \text{TO} + 0.44 \times \text{FTA}$, and offensive/defensive efficiency is points per 100 possessions. The raw numbers are then adjusted for strength of schedule via 50 iterations of a fixed-point method: if a team played against tough defenses, its raw offensive efficiency is adjusted upward, and vice versa.
+
+The resulting net efficiency (offensive minus defensive) is a continuous variable, unlike the integer ranks from the Massey file. We had high hopes for this. In practice, the logistic model trained on our net efficiency difference scored 0.225, much worse than the POM ordinal rank at 0.196. The most likely explanation is that our SOS adjustment, while better than nothing, is crude compared to what KenPom actually does. KenPom's model accounts for tempo, home-court effects, player availability, and uses a more sophisticated regression framework. We are computing averages and iterating. The gap shows.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Backtest Results}
+
+Table~\ref{tab:loto} reports the full LOTO results. Figure~\ref{fig:loto-bar} shows the same data visually.
+
+\begin{table}[h]
+\centering
+\caption{Leave-one-tournament-out Brier scores (2014--2025, 11 folds). Lower is better. Benchmarks: coin flip = 0.250, seed baseline $\approx$ 0.200, Vegas $\approx$ 0.175.}
+\label{tab:loto}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Model} & \textbf{Mean Brier} & \textbf{Std} & \textbf{Best / Worst Season} \\
+\midrule
+KenPom Logistic & 0.196 & 0.017 & 2025 / 2021 \\
+Multi-Feature Logistic & 0.197 & 0.021 & 2025 / 2022 \\
+Seed Logistic & 0.199 & 0.021 & 2025 / 2021 \\
+Mixture of Experts (K=4) & 0.209 & 0.025 & 2025 / 2023 \\
+XGBoost & 0.214 & 0.028 & 2025 / 2014 \\
+Elo & 0.221 & 0.023 & 2014 / 2021 \\
+Efficiency Logistic & 0.225 & 0.016 & 2015 / 2022 \\
+Transformer (4-layer) & 0.245 & 0.031 & 2019 / 2014 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.88\textwidth]{../output/loto_comparison.png}
+\caption{Mean LOTO Brier score by model. Blue bars are below the seed baseline; red bars are above.}
+\label{fig:loto-bar}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.88\textwidth]{../output/loto_per_season.png}
+\caption{Per-season Brier scores for four selected models. All models struggle with 2021 (first post-COVID tournament) and do well on 2025. The year-to-year variance is large relative to model differences.}
+\label{fig:loto-season}
+\end{figure}
+
+A few things stand out. 2021 is the worst season for almost every model. That was the first tournament after COVID canceled the 2020 season entirely, so teams had unusual rosters, limited non-conference scheduling, and the selection committee had less data to work with. 2025 is the best season across the board, possibly because the field was unusually chalky (top seeds advanced as expected). Year-to-year variance (std $\approx 0.02$) is comparable to the gap between the best and worst models, which means a single lucky or unlucky tournament can swing the rankings.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{What Worked and What Didn't}
+
+\subsection{The ordinal rank ceiling}
+
+This is the biggest lesson from the last two weeks. The Massey ordinals file gives us 165 ranking systems, but every one of them is an integer rank from 1 to 363. The difference between the \#1 team and the \#5 team might be 15 points of efficiency margin, or it might be 2. The difference between \#150 and \#155 is even less meaningful. When we fit a logistic model on these ranks, we are asking a linear function to map integers to probabilities, and it can only do so much.
+
+The real KenPom AdjEM is a continuous efficiency margin (points per 100 possessions above average) that captures far more information. Kaggle competition winners who use AdjEM directly report Brier scores around 0.185~\citep{pomeroy2004}. Our best logistic model, working from the ordinal rank alone, lands at 0.196. That 0.011 gap is almost exactly what we'd expect to lose by discretizing a continuous predictor into 363 bins.
+
+\subsection{Why XGBoost underperforms logistic regression}
+
+This was the most counterintuitive result. XGBoost on 53 features (0.214) is worse than logistic regression on 1 feature (0.196). We think there are two reasons. First, 27 of those 53 features are rating system ranks that are correlated above 0.95 with each other. XGBoost can handle collinearity in theory, but in practice, with only $\sim$670 training games per LOTO fold, it splits on redundant features and overfits. Second, the momentum and Four Factors features, while reasonable in principle, add noise when the signal is this weak. A team's season-average eFG\% does predict tournament performance, but not by much once you already know it's a 2 seed.
+
+\subsection{MoE: a cautionary tale about feature scaling}
+
+The MoE went from the worst model (0.257) to mid-pack (0.209) with a one-line fix. Before adding StandardScaler, the LBFGS solver for the expert logistic regressions could not converge because POM rank differences ($\sim\pm 250$) dominated the gradient over momentum ($\sim\pm 1$). The EM algorithm ran its 10 iterations, but the experts never learned anything useful. After scaling, convergence warnings disappeared and the model started behaving. It's still not competitive with the baselines, but the improvement from one line of code was by far the biggest delta of any change we made.
+
+\subsection{Transformer: not enough data}
+
+A 4-layer Transformer with 64-dim embeddings has about 50K parameters. We trained it on 736 tournament games. That's about 15 data points per parameter, which is not enough by any standard. We expected this going in but wanted to see the numbers. Pretraining on the 124K regular-season games is the obvious next step and is scheduled for the final phase.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Next Steps}
+
+Three things for the final phase (Weeks 4--6). First, we want to acquire the actual KenPom AdjEM continuous efficiency ratings, either through a \$25/year subscription or by improving our self-computed version with a more sophisticated SOS model. This is the single change most likely to move the needle. Second, we will pretrain the Transformer encoder on regular-season game prediction before fine-tuning on tournament data. Third, we will build a weighted ensemble of the top models with weights optimized on held-out Brier score, and evaluate whether the ensemble beats the best single model. If we get AdjEM working, we are cautiously targeting a final Brier below 0.185.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Oliver(2004)]{oliver2004}
+Oliver, D.
+\newblock \emph{Basketball on Paper: Rules and Tools for Performance Analysis}.
+\newblock Potomac Books, 2004.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Sokol et~al.(2020)]{sokol2020}
+Sokol, J., Jank, W., and Harp, S.
+\newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
+\newblock Georgia Institute of Technology, 2006--2026.
+
+\end{thebibliography}
+
+\end{document}
