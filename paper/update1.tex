@@ -1,0 +1,203 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#1}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#1: Data Pipeline \& Exploratory Analysis}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{March 27, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Overview}
+
+This report covers our first week of work (March 20--27). We built out the data ingestion pipeline, assembled an initial feature matrix from the Kaggle March Machine Learning Mania dataset, and ran exploratory analysis on seed performance, rating systems, and momentum. All four planned deliverables for this phase are done: the pipeline runs end-to-end, the feature matrix is ready for modeling, the EDA notebook is checked into the repository, and the codebase is structured for the work ahead.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Data and Pipeline}
+
+Kaggle provides about 35 CSVs spanning Men's and Women's divisions. We only use the Men's side. Table~\ref{tab:data-summary} lists what we ingest.
+
+\begin{table}[h]
+\centering
+\caption{Ingested datasets (Men's division).}
+\label{tab:data-summary}
+\small
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Dataset} & \textbf{Rows} & \textbf{Coverage} \\
+\midrule
+Regular season box scores & 124,530 & 2003--2026 \\
+Tournament results (compact) & 2,586 & 2003--2026 \\
+Tournament box scores (detailed) & 1,450 & 2003--2026 \\
+Massey ordinals & 5,865,002 & 100+ ranking systems, daily \\
+Seeds & 2,695 & 1985--2026 \\
+Game locations & 92,439 & Venue/city-level \\
+Coaching records & 13,901 & Coach--team--season \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Massey ordinals file is by far the largest at $\sim$5.9M rows: it logs daily rankings from over 100 independent systems for every D1 team. Most of these systems are obscure or short-lived. We keep 9 that have broad coverage across 2003--2026 (POM, SAG, MOR, DOL, COL, AP, USA, WOL, RPI) and snapshot each at day~133, just before Selection Sunday. That reduces the working table to about 3{,}000 rows per season.
+
+On the implementation side, a single call to \texttt{build\_feature\_matrix()} takes in raw CSVs, joins seeds and ratings onto tournament matchups, computes rolling momentum stats, and outputs a matchup-level DataFrame. We spent more time than expected wrangling Kaggle's seed encoding (strings like \texttt{W01}, \texttt{X11a}, \texttt{Z16b}) but the rest of the pipeline came together without issues.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Feature Construction}
+
+We have three of the four feature layers from the proposal working. Layer~4 (market-implied probabilities from Kalshi) comes later.
+
+\paragraph{Static ratings (L1).} For each team in the tournament, we pull its ordinal rank from the 9 selected Massey systems and compute pairwise differences for each matchup. One wrinkle we didn't fully anticipate: the AP and USA Today polls only rank 25 teams, so roughly half the tournament field has missing values in those columns. The algorithmic systems (POM, SAG, MOR) rank every D1 team and don't have this problem.
+
+\paragraph{Seed features (L2).} Seed difference $\Delta s = s_A - s_B$ is the single most interpretable feature we have. It directly encodes the committee's view of team quality.
+
+\paragraph{Momentum (L3).} We compute a rolling 10-game window at the end of each team's regular season: win percentage and average margin. These get differenced at the matchup level, same as the rating features.
+
+\paragraph{The matrix.} 736 tournament games from 2014 through 2026, 39 features per matchup. We order matchups canonically by TeamID (lower ID = Team~A), which gives a nearly balanced label split: Team~A wins 51.2\% of the time. Missingness is 13.1\% of all cells, but it's entirely in the AP, USA, and WOL columns. The core features (seeds, POM, SAG, MOR) are complete.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Exploratory Findings}
+
+\subsection{Seeds}
+
+Lower-seeded teams won 27.3\% of tournament games across 2003--2026. Figure~\ref{fig:seed-winrate} shows win rate by seed. The decline from seed~1 to seed~16 is mostly monotonic, but the middle of the bracket is messy. Seeds~8 and~9 are statistically indistinguishable, which makes sense: they play each other in the first round. Seeds~10 through~12 overlap in win rate too, reflecting the committee's well-known difficulty separating bubble teams~\citep{sokol2020}. The 2018 tournament, where UMBC (a 16 seed) beat Virginia (the overall 1 seed), is the kind of tail event that makes the Brier score punishing on confident predictions near 0 or 1.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.82\textwidth]{../output/seed_win_rate.png}
+\caption{Tournament win rate by seed, 2003--2026. Mid-range seeds (8--12) are poorly separated.}
+\label{fig:seed-winrate}
+\end{figure}
+
+\subsection{Rating system predictive power}
+
+Table~\ref{tab:feature-corr} shows Pearson correlations of our difference features against the binary outcome. POM, SAG, and MOR are the top three, all near $|r| = 0.43$. Seed difference is at 0.40. That gap is surprisingly small. It means the ranking algorithms, at least at the ordinal level we get from the Massey file, add only a few percentage points of predictive information over what the committee already bakes into the seed line. We suspect the story is different with the actual KenPom efficiency margin (AdjEM), which is a continuous variable and captures more fine-grained information than a rank. We may scrape or purchase that data later.
+
+\begin{table}[h]
+\centering
+\caption{Pearson correlation of difference features with outcome (2014--2026, $n = 736$). Negative values mean a lower (better) rank for Team~A predicts a Team~A win.}
+\label{tab:feature-corr}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Feature} & $r$ \\
+\midrule
+$\Delta r_{\text{POM}}$ (KenPom) & $-0.43$ \\
+$\Delta r_{\text{SAG}}$ (Sagarin) & $-0.43$ \\
+$\Delta r_{\text{MOR}}$ (Massey) & $-0.43$ \\
+$\Delta r_{\text{DOL}}$ (Dolphin) & $-0.42$ \\
+$\Delta r_{\text{WOL}}$ (Wolfe) & $-0.41$ \\
+$\Delta s$ (seed) & $-0.40$ \\
+$\Delta r_{\text{AP}}$ (AP poll) & $-0.36$ \\
+$\Delta\text{margin}$ (10-game) & $+0.11$ \\
+$\Delta\text{winpct}$ (10-game) & $+0.04$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The momentum features are weak. Margin difference gets $r = 0.11$; win percentage is basically noise at 0.04. This isn't shocking. A team that goes 9--1 over its last 10 games in the Big East had a much harder schedule than one that does the same in the Patriot League, and our rolling average doesn't account for that. \citet{pomeroy2004} has made a similar point about raw win-loss records being misleading without schedule adjustment. We think the Transformer encoder we have planned for Weeks~3--4 might do better here, since it sees the opponent identity for each game rather than just the margin.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.82\textwidth]{../output/feature_target_correlation.png}
+\caption{Feature-outcome correlations. The rating differences cluster near $|r| = 0.42$; momentum features are much weaker.}
+\label{fig:feature-corr}
+\end{figure}
+
+\subsection{Redundancy among rating systems}
+
+Figure~\ref{fig:rating-corr} shows pairwise rank correlations for the 2025 season. POM, SAG, and MOR are correlated above 0.95. Even the less similar pairs exceed 0.85. The AP poll is the outlier, which is expected: it only ranks 25 teams, so rank values are truncated and the correlation with full-field systems is mechanically lower.
+
+For modeling, the collinearity means throwing all 9 rank differences into a logistic regression is wasteful and will inflate standard errors. We plan to either pick one representative system (probably POM) or project onto a couple of principal components for linear baselines. XGBoost can handle the redundancy on its own, so for tree models we'll just include everything.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.72\textwidth]{../output/rating_correlation.png}
+\caption{Pairwise Spearman correlation of ordinal rankings, 9 systems, 2025 season ($n = 362$ teams).}
+\label{fig:rating-corr}
+\end{figure}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Challenges}
+
+Two things came up that we didn't fully think through in the proposal.
+
+The first is the missing data problem with poll-based rankings. We originally planned to treat all Massey systems the same, but AP and USA Today polls only cover 25 teams. That's a problem because a lot of tournament teams (especially 12--16 seeds from mid-major conferences) never appear in those polls. We'll probably drop AP and USA from the linear models entirely and only feed them to tree-based models, which handle NaN natively.
+
+The second is that our momentum features are weaker than we hoped. A 10-game rolling average is too crude to separate real form from schedule effects. A team closing out the season with 10 straight wins over weak opponents looks the same in our features as one beating ranked teams down the stretch. We think the Transformer sequence encoder, which sees opponent identity and game context for each game individually, can do a better job. But that's a Week 3--4 task, so for now we'll keep the rolling averages in the feature set and see whether XGBoost can extract any additional signal from them beyond what the ratings already provide.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Next Steps}
+
+Our Week 2--3 goal is to get baseline models trained and backtested. We'll fit seed-only logistic regression, a season-long Elo system, a KenPom-difference logistic model, and XGBoost on the full feature set. Everything gets evaluated with leave-one-tournament-out CV over 2014--2026. We want to know where we stand on the seed baseline ($\sim$0.200 Brier) to Vegas line ($\sim$0.175) spectrum before we spend time on the MoE and Transformer architectures.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Sokol et~al.(2020)]{sokol2020}
+Sokol, J., Jank, W., and Harp, S.
+\newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
+\newblock Georgia Institute of Technology, 2006--2026.
+
+\end{thebibliography}
+
+\end{document}

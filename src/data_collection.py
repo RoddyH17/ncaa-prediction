@@ -14,33 +14,50 @@ import os
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent / "data"
-KAGGLE_DIR = DATA_DIR / "kaggle"
-KENPOM_DIR = DATA_DIR / "kenpom"
-BARTTORVIK_DIR = DATA_DIR / "barttorvik"
+EXTERNAL_DIR = DATA_DIR / "external"
 ODDS_DIR = DATA_DIR / "odds"
 
 
-def download_kaggle_data(competition: str = "march-machine-learning-mania-2026"):
-    """Download competition data via Kaggle CLI."""
-    KAGGLE_DIR.mkdir(parents=True, exist_ok=True)
-    os.system(f"kaggle competitions download -c {competition} -p {KAGGLE_DIR}")
-    # Unzip
-    import zipfile
-    for f in KAGGLE_DIR.glob("*.zip"):
-        with zipfile.ZipFile(f) as z:
-            z.extractall(KAGGLE_DIR)
-        f.unlink()
-
-
-def load_kaggle_csv(filename: str):
-    """Load a single Kaggle CSV file."""
+def load_csv(filename: str):
+    """Load a CSV file from data/."""
     import pandas as pd
-    return pd.read_csv(KAGGLE_DIR / filename)
+    path = DATA_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found. Unzip Kaggle data into data/.")
+    return pd.read_csv(path)
+
+
+def load_all_mens_data() -> dict:
+    """Load all core Men's tournament data into a dict of DataFrames."""
+    import pandas as pd
+    files = {
+        "regular_detail": "MRegularSeasonDetailedResults.csv",
+        "regular_compact": "MRegularSeasonCompactResults.csv",
+        "tourney_detail": "MNCAATourneyDetailedResults.csv",
+        "tourney_compact": "MNCAATourneyCompactResults.csv",
+        "seeds": "MNCAATourneySeeds.csv",
+        "slots": "MNCAATourneySlots.csv",
+        "massey": "MMasseyOrdinals.csv",
+        "teams": "MTeams.csv",
+        "seasons": "MSeasons.csv",
+        "coaches": "MTeamCoaches.csv",
+        "conferences": "MTeamConferences.csv",
+        "game_cities": "MGameCities.csv",
+    }
+    data = {}
+    for key, fname in files.items():
+        path = DATA_DIR / fname
+        if path.exists():
+            print(f"Loading {fname}...")
+            data[key] = pd.read_csv(path)
+        else:
+            print(f"Warning: {fname} not found, skipping.")
+    return data
 
 
 def load_massey_ordinals(season: int | None = None):
     """Load Massey composite rankings. Optionally filter by season."""
-    df = load_kaggle_csv("MMasseyOrdinals.csv")
+    df = load_csv("MMasseyOrdinals.csv")
     if season:
         df = df[df["Season"] == season]
     return df
@@ -87,6 +104,7 @@ def fetch_kalshi_ncaa_markets():
 
 
 if __name__ == "__main__":
-    print("Downloading Kaggle data...")
-    download_kaggle_data()
+    data = load_all_mens_data()
+    for key, df in data.items():
+        print(f"  {key}: {df.shape}")
     print("Done.")

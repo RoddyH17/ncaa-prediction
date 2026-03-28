@@ -6,3 +6,10 @@ __pycache__/
 *.egg-info/
 .env
 .venv/
+*.zip
+*.aux
+*.log
+*.out
+*.synctex.gz
+.claude/
+proposal.pdf
