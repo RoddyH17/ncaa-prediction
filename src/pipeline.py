@@ -120,10 +120,13 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
                 "seed_B": m["SeedB"],
             }
 
-            # L1: Rating diffs
-            for sys_name in ratings.columns if not ratings.empty else []:
-                rank_a = ratings.loc[m["TeamA"], sys_name] if m["TeamA"] in ratings.index else np.nan
-                rank_b = ratings.loc[m["TeamB"], sys_name] if m["TeamB"] in ratings.index else np.nan
+            # L1: Rating diffs (fixed set of systems for consistent columns)
+            for sys_name in ["POM", "SAG", "MOR", "DOL", "COL", "AP", "USA", "WOL", "RPI"]:
+                rank_a = np.nan
+                rank_b = np.nan
+                if not ratings.empty and sys_name in ratings.columns:
+                    rank_a = ratings.loc[m["TeamA"], sys_name] if m["TeamA"] in ratings.index else np.nan
+                    rank_b = ratings.loc[m["TeamB"], sys_name] if m["TeamB"] in ratings.index else np.nan
                 feat[f"rank_diff_{sys_name}"] = rank_a - rank_b
                 feat[f"rank_A_{sys_name}"] = rank_a
                 feat[f"rank_B_{sys_name}"] = rank_b
@@ -144,6 +147,18 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
     X = pd.DataFrame(all_features)
     y = np.array(all_matchups)
     return X, y
+
+
+_ID_COLS = ["Season", "TeamA", "TeamB"]
+
+
+def make_build_features_fn(data: dict):
+    """Closure adapter for evaluation.py's LOTO interface.
+    Returns a function with signature: (seasons) -> (X, y)
+    """
+    def build_features_fn(seasons):
+        return build_feature_matrix(data, seasons)
+    return build_features_fn
 
 
 def build_dataset(
