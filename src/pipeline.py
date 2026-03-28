@@ -79,6 +79,169 @@ def build_rating_features_for_season(data: dict, season: int, day_cutoff: int = 
     return pivot
 
 
+def build_efficiency_for_season(data: dict, season: int) -> pd.DataFrame:
+    """
+    Compute tempo-adjusted efficiency metrics from box scores.
+    This is our own version of KenPom-style efficiency ratings.
+
+    Returns DataFrame indexed by TeamID with columns:
+      off_eff, def_eff, net_eff, tempo
+      (plus SOS-adjusted versions using iterative adjustment)
+    """
+    detail = data.get("regular_detail")
+    if detail is None:
+        return pd.DataFrame()
+
+    sg = detail[detail["Season"] == season]
+    if sg.empty:
+        return pd.DataFrame()
+
+    # Accumulate per-team stats
+    team_stats = {}
+
+    for _, g in sg.iterrows():
+        w, l = g["WTeamID"], g["LTeamID"]
+
+        # Estimate possessions for each team
+        w_poss = g["WFGA"] - g["WOR"] + g["WTO"] + 0.44 * g["WFTA"]
+        l_poss = g["LFGA"] - g["LOR"] + g["LTO"] + 0.44 * g["LFTA"]
+        # Average possessions (should be roughly equal)
+        avg_poss = (w_poss + l_poss) / 2
+        avg_poss = max(avg_poss, 1)
+
+        for tid, pts_for, pts_against in [(w, g["WScore"], g["LScore"]),
+                                           (l, g["LScore"], g["WScore"])]:
+            if tid not in team_stats:
+                team_stats[tid] = {"games": 0, "poss": 0,
+                                   "pts_for": 0, "pts_against": 0,
+                                   "opponents": []}
+            ts = team_stats[tid]
+            ts["games"] += 1
+            ts["poss"] += avg_poss
+            ts["pts_for"] += pts_for
+            ts["pts_against"] += pts_against
+            opp = l if tid == w else w
+            ts["opponents"].append(opp)
+
+    # Phase 1: raw efficiency
+    raw = {}
+    for tid, ts in team_stats.items():
+        total_poss = max(ts["poss"], 1)
+        raw[tid] = {
+            "off_eff": ts["pts_for"] / total_poss * 100,
+            "def_eff": ts["pts_against"] / total_poss * 100,
+            "tempo": ts["poss"] / ts["games"],
+        }
+        raw[tid]["net_eff"] = raw[tid]["off_eff"] - raw[tid]["def_eff"]
+
+    # Phase 2: SOS-adjusted efficiency via iterative fixed-point method
+    # Solve: AdjO_i = RawO_i + mean(AdjD_opponents - league_avg) * alpha
+    # Iterate until convergence (like KenPom's approach)
+    adj = {tid: dict(r) for tid, r in raw.items()}
+    league_off = np.mean([r["off_eff"] for r in raw.values()])
+    league_def = np.mean([r["def_eff"] for r in raw.values()])
+
+    for iteration in range(50):
+        new_adj = {}
+        for tid, ts in team_stats.items():
+            opp_adj_def = np.mean([adj[o]["def_eff"] for o in ts["opponents"] if o in adj])
+            opp_adj_off = np.mean([adj[o]["off_eff"] for o in ts["opponents"] if o in adj])
+
+            # How much harder/easier was the schedule?
+            sos_off = opp_adj_def - league_def  # faced tough defenses -> boost offense
+            sos_def = opp_adj_off - league_off  # faced tough offenses -> credit defense
+
+            new_adj[tid] = {
+                "off_eff": raw[tid]["off_eff"] + sos_off,
+                "def_eff": raw[tid]["def_eff"] - sos_def,
+                "tempo": raw[tid]["tempo"],
+            }
+            new_adj[tid]["net_eff"] = new_adj[tid]["off_eff"] - new_adj[tid]["def_eff"]
+        adj = new_adj
+
+    rows = []
+    for tid in adj:
+        rows.append({
+            "TeamID": tid,
+            "off_eff": adj[tid]["off_eff"],
+            "def_eff": adj[tid]["def_eff"],
+            "net_eff": adj[tid]["net_eff"],
+            "tempo": adj[tid]["tempo"],
+        })
+    return pd.DataFrame(rows).set_index("TeamID")
+
+
+def build_four_factors_for_season(data: dict, season: int) -> pd.DataFrame:
+    """
+    Compute Dean Oliver's Four Factors from season box scores.
+    Returns DataFrame indexed by TeamID with columns:
+      efg_pct, to_pct, or_pct, ft_rate (offensive)
+      opp_efg_pct, opp_to_pct, opp_or_pct, opp_ft_rate (defensive)
+    """
+    detail = data.get("regular_detail")
+    if detail is None:
+        return pd.DataFrame()
+
+    sg = detail[detail["Season"] == season]
+    if sg.empty:
+        return pd.DataFrame()
+
+    records = {}
+
+    for _, g in sg.iterrows():
+        w, l = g["WTeamID"], g["LTeamID"]
+
+        # Winner offense
+        w_fga = max(g["WFGA"], 1)
+        w_fta = max(g["WFTA"], 1)
+        w_off = {
+            "efg": (g["WFGM"] + 0.5 * g["WFGM3"]) / w_fga,
+            "to":  g["WTO"] / max(w_fga + 0.44 * w_fta + g["WTO"], 1),
+            "or":  g["WOR"] / max(g["WOR"] + g["LDR"], 1),
+            "ftr": g["WFTM"] / w_fga,
+        }
+        # Loser offense
+        l_fga = max(g["LFGA"], 1)
+        l_fta = max(g["LFTA"], 1)
+        l_off = {
+            "efg": (g["LFGM"] + 0.5 * g["LFGM3"]) / l_fga,
+            "to":  g["LTO"] / max(l_fga + 0.44 * l_fta + g["LTO"], 1),
+            "or":  g["LOR"] / max(g["LOR"] + g["WDR"], 1),
+            "ftr": g["LFTM"] / l_fga,
+        }
+
+        for tid, off, opp_off in [(w, w_off, l_off), (l, l_off, w_off)]:
+            if tid not in records:
+                records[tid] = {"games": 0, "efg": 0, "to": 0, "or": 0, "ftr": 0,
+                                "opp_efg": 0, "opp_to": 0, "opp_or": 0, "opp_ftr": 0}
+            r = records[tid]
+            r["games"] += 1
+            r["efg"] += off["efg"]
+            r["to"] += off["to"]
+            r["or"] += off["or"]
+            r["ftr"] += off["ftr"]
+            r["opp_efg"] += opp_off["efg"]
+            r["opp_to"] += opp_off["to"]
+            r["opp_or"] += opp_off["or"]
+            r["opp_ftr"] += opp_off["ftr"]
+
+    rows = []
+    for tid, r in records.items():
+        n = r["games"]
+        rows.append({
+            "TeamID": tid,
+            "efg_pct": r["efg"] / n,
+            "to_pct": r["to"] / n,
+            "or_pct": r["or"] / n,
+            "ft_rate": r["ftr"] / n,
+            "opp_efg_pct": r["opp_efg"] / n,
+            "opp_to_pct": r["opp_to"] / n,
+            "opp_or_pct": r["opp_or"] / n,
+            "opp_ft_rate": r["opp_ftr"] / n,
+        })
+    return pd.DataFrame(rows).set_index("TeamID")
+
+
 def build_momentum_for_season(data: dict, season: int, team_ids: list, last_n: int = 10) -> pd.DataFrame:
     """Build momentum features for all teams in a season."""
     results = data["regular_compact"]
@@ -105,6 +268,8 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
             continue
 
         ratings = build_rating_features_for_season(data, season)
+        efficiency = build_efficiency_for_season(data, season)
+        four_factors = build_four_factors_for_season(data, season)
         all_team_ids = list(set(matchups["TeamA"].tolist() + matchups["TeamB"].tolist()))
         momentum = build_momentum_for_season(data, season, all_team_ids)
         mom_map = {row["TeamID"]: row for _, row in momentum.iterrows()}
@@ -130,6 +295,23 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
                 feat[f"rank_diff_{sys_name}"] = rank_a - rank_b
                 feat[f"rank_A_{sys_name}"] = rank_a
                 feat[f"rank_B_{sys_name}"] = rank_b
+
+            # L2a: Tempo-adjusted efficiency (our own AdjEM)
+            for col in ["off_eff", "def_eff", "net_eff", "tempo"]:
+                val_a = efficiency.loc[m["TeamA"], col] if (not efficiency.empty and m["TeamA"] in efficiency.index) else np.nan
+                val_b = efficiency.loc[m["TeamB"], col] if (not efficiency.empty and m["TeamB"] in efficiency.index) else np.nan
+                feat[f"{col}_diff"] = val_a - val_b
+                if col == "net_eff":
+                    feat[f"{col}_A"] = val_a
+                    feat[f"{col}_B"] = val_b
+
+            # L2b: Four Factors (continuous efficiency metrics)
+            ff_cols = ["efg_pct", "to_pct", "or_pct", "ft_rate",
+                       "opp_efg_pct", "opp_to_pct", "opp_or_pct", "opp_ft_rate"]
+            for col in ff_cols:
+                val_a = four_factors.loc[m["TeamA"], col] if (not four_factors.empty and m["TeamA"] in four_factors.index) else np.nan
+                val_b = four_factors.loc[m["TeamB"], col] if (not four_factors.empty and m["TeamB"] in four_factors.index) else np.nan
+                feat[f"{col}_diff"] = val_a - val_b
 
             # L3: Momentum
             mom_a = mom_map.get(m["TeamA"], {})

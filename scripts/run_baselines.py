@@ -14,8 +14,8 @@ from src.data_collection import load_all_mens_data
 from src.pipeline import make_build_features_fn
 from src.evaluation import leave_one_tournament_out, compare_models
 from src.models import (
-    SeedLogistic, KenPomLogistic, EloSklearnWrapper,
-    GradientBoostingModel, MixtureOfExperts,
+    SeedLogistic, KenPomLogistic, EfficiencyLogistic, MultiFeatureLogistic,
+    EloSklearnWrapper, GradientBoostingModel, MixtureOfExperts,
 )
 from src.transformer_model import TransformerSklearnWrapper
 
@@ -30,6 +30,8 @@ def main():
     models = {
         "SeedLogistic": lambda: SeedLogistic(),
         "KenPomLogistic": lambda: KenPomLogistic(),
+        "EfficiencyLogistic": lambda: EfficiencyLogistic(),
+        "MultiFeatureLogistic": lambda: MultiFeatureLogistic(C=0.5),
         "Elo": lambda: EloSklearnWrapper(data),
         "XGBoost": lambda: GradientBoostingModel("xgboost"),
         "MoE (K=4)": lambda: MixtureOfExperts(n_experts=4),

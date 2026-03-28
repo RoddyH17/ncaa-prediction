@@ -13,6 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
 
 _ID_COLS = ["Season", "TeamA", "TeamB"]
 
@@ -70,6 +71,52 @@ class KenPomLogistic(BaseEstimator, ClassifierMixin):
     def predict_proba(self, X):
         col = X[["rank_diff_POM"]].fillna(0)
         return self.model.predict_proba(col)
+
+
+class EfficiencyLogistic(BaseEstimator, ClassifierMixin):
+    """Logistic regression on our computed net efficiency difference."""
+
+    def __init__(self):
+        self.model = LogisticRegression()
+
+    def fit(self, X, y):
+        col = X[["net_eff_diff"]].fillna(0)
+        self.model.fit(col, y)
+        return self
+
+    def predict_proba(self, X):
+        col = X[["net_eff_diff"]].fillna(0)
+        return self.model.predict_proba(col)
+
+
+class MultiFeatureLogistic(BaseEstimator, ClassifierMixin):
+    """Logistic regression on selected continuous features with scaling."""
+
+    _FEATURE_COLS = [
+        "seed_diff", "net_eff_diff", "off_eff_diff", "def_eff_diff", "tempo_diff",
+        "efg_pct_diff", "to_pct_diff", "or_pct_diff", "ft_rate_diff",
+        "opp_efg_pct_diff", "opp_to_pct_diff", "opp_or_pct_diff", "opp_ft_rate_diff",
+        "rank_diff_POM",
+        "momentum_margin_diff", "momentum_winpct_diff",
+    ]
+
+    def __init__(self, C=1.0):
+        self.C = C
+        self.pipe = None
+
+    def fit(self, X, y):
+        cols = [c for c in self._FEATURE_COLS if c in X.columns]
+        self.cols_ = cols
+        self.pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("lr", LogisticRegression(C=self.C, max_iter=2000, solver="lbfgs")),
+        ])
+        self.pipe.fit(X[cols], y)
+        return self
+
+    def predict_proba(self, X):
+        return self.pipe.predict_proba(X[self.cols_])
 
 
 class EloRating:
@@ -212,6 +259,7 @@ class MixtureOfExperts(BaseEstimator, ClassifierMixin):
         self.experts = []
         self.gating = None
         self.imputer_ = None
+        self.scaler_ = None
 
     def _init_assignments(self, X):
         """Initialize expert assignments by seed gap bins."""
@@ -234,7 +282,8 @@ class MixtureOfExperts(BaseEstimator, ClassifierMixin):
     def fit(self, X, y):
         X_feat = _drop_id_cols(X)
         self.imputer_ = SimpleImputer(strategy="median")
-        X_imp = self.imputer_.fit_transform(X_feat)
+        self.scaler_ = StandardScaler()
+        X_imp = self.scaler_.fit_transform(self.imputer_.fit_transform(X_feat))
 
         assignments = self._init_assignments(X)
 
@@ -277,7 +326,7 @@ class MixtureOfExperts(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, X):
         X_feat = _drop_id_cols(X)
-        X_imp = self.imputer_.transform(X_feat)
+        X_imp = self.scaler_.transform(self.imputer_.transform(X_feat))
         gate_probs = self.gating.predict_proba(X_imp)
 
         weighted_probs = np.zeros(len(X_imp))
