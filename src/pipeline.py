@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from src.data_collection import DATA_DIR, load_csv, load_all_mens_data
+from src.data_collection import DATA_DIR, load_csv, load_all_mens_data, fetch_barttorvik_ratings
 from src.features import build_seed_features, build_rating_features, build_momentum_features
 
 
@@ -242,6 +242,64 @@ def build_four_factors_for_season(data: dict, season: int) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("TeamID")
 
 
+def build_barttorvik_for_season(season: int) -> pd.DataFrame:
+    """
+    Load Barttorvik continuous efficiency ratings for a season.
+    Returns DataFrame indexed by TeamID with columns:
+      AdjOE, AdjDE, NetRtg, Barthag, AdjTempo
+    """
+    df = fetch_barttorvik_ratings(season)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # Drop duplicates, keeping the higher-rated entry
+    df = df.sort_values("NetRtg", ascending=False).drop_duplicates(subset="TeamID", keep="first")
+    return df.set_index("TeamID")
+
+
+def build_coach_features_for_season(data: dict, season: int) -> pd.DataFrame:
+    """
+    Build coach tournament experience features.
+    Returns DataFrame indexed by TeamID with columns:
+      coach_tourney_apps: number of prior tournament appearances as head coach
+      coach_seasons: total seasons as head coach at any school
+    """
+    coaches = data.get("coaches")
+    seeds = data.get("seeds")
+    if coaches is None or seeds is None:
+        return pd.DataFrame()
+
+    # Current coaches for this season
+    current = coaches[(coaches["Season"] == season)]
+    if current.empty:
+        return pd.DataFrame()
+
+    # Count prior tournament appearances per coach
+    # A coach "appeared" if their team got a seed in a prior year
+    past_coaches = coaches[coaches["Season"] < season]
+    past_seeds = seeds[seeds["Season"] < season]
+
+    # Merge to find which coach-seasons had tournament bids
+    if not past_coaches.empty and not past_seeds.empty:
+        merged = past_coaches.merge(past_seeds[["Season", "TeamID"]], on=["Season", "TeamID"], how="inner")
+        coach_apps = merged.groupby("CoachName").size().to_dict()
+    else:
+        coach_apps = {}
+
+    # Total coaching seasons per coach
+    coach_seasons = past_coaches.groupby("CoachName").size().to_dict()
+
+    rows = []
+    for _, row in current.iterrows():
+        coach = row["CoachName"]
+        rows.append({
+            "TeamID": row["TeamID"],
+            "coach_tourney_apps": coach_apps.get(coach, 0),
+            "coach_seasons": coach_seasons.get(coach, 0),
+        })
+
+    return pd.DataFrame(rows).drop_duplicates(subset="TeamID", keep="last").set_index("TeamID")
+
+
 def build_momentum_for_season(data: dict, season: int, team_ids: list, last_n: int = 10) -> pd.DataFrame:
     """Build momentum features for all teams in a season."""
     results = data["regular_compact"]
@@ -270,6 +328,8 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
         ratings = build_rating_features_for_season(data, season)
         efficiency = build_efficiency_for_season(data, season)
         four_factors = build_four_factors_for_season(data, season)
+        barttorvik = build_barttorvik_for_season(season)
+        coach_feats = build_coach_features_for_season(data, season)
         all_team_ids = list(set(matchups["TeamA"].tolist() + matchups["TeamB"].tolist()))
         momentum = build_momentum_for_season(data, season, all_team_ids)
         mom_map = {row["TeamID"]: row for _, row in momentum.iterrows()}
@@ -295,6 +355,15 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
                 feat[f"rank_diff_{sys_name}"] = rank_a - rank_b
                 feat[f"rank_A_{sys_name}"] = rank_a
                 feat[f"rank_B_{sys_name}"] = rank_b
+
+            # L1b: Barttorvik continuous efficiency ratings
+            bart_cols = [("AdjOE", "bart_adjoe"), ("AdjDE", "bart_adjde"),
+                         ("NetRtg", "bart_net"), ("Barthag", "bart_barthag"),
+                         ("AdjTempo", "bart_tempo")]
+            for src_col, feat_name in bart_cols:
+                val_a = barttorvik.loc[m["TeamA"], src_col] if (not barttorvik.empty and m["TeamA"] in barttorvik.index) else np.nan
+                val_b = barttorvik.loc[m["TeamB"], src_col] if (not barttorvik.empty and m["TeamB"] in barttorvik.index) else np.nan
+                feat[f"{feat_name}_diff"] = val_a - val_b
 
             # L2a: Tempo-adjusted efficiency (our own AdjEM)
             for col in ["off_eff", "def_eff", "net_eff", "tempo"]:
@@ -322,6 +391,12 @@ def build_feature_matrix(data: dict, seasons: list[int]) -> tuple[pd.DataFrame, 
             feat["momentum_margin_A"] = mom_a.get("momentum_avg_margin", 0.0)
             feat["momentum_margin_B"] = mom_b.get("momentum_avg_margin", 0.0)
             feat["momentum_margin_diff"] = feat["momentum_margin_A"] - feat["momentum_margin_B"]
+
+            # L4: Coach tournament experience
+            for col in ["coach_tourney_apps", "coach_seasons"]:
+                val_a = coach_feats.loc[m["TeamA"], col] if (not coach_feats.empty and m["TeamA"] in coach_feats.index) else 0
+                val_b = coach_feats.loc[m["TeamB"], col] if (not coach_feats.empty and m["TeamB"] in coach_feats.index) else 0
+                feat[f"{col}_diff"] = val_a - val_b
 
             all_features.append(feat)
             all_matchups.append(m["Result"])
