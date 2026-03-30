@@ -58,93 +58,68 @@
 % ══════════════════════════════════════════════════════════════════════════
 \section{Overview}
 
-This report covers Weeks 2--4 (March 27 through April 10). We implemented nine prediction models spanning three tiers of complexity, expanded the feature set with Barttorvik continuous efficiency ratings, Dean Oliver's Four Factors, and coach tournament experience features, and ran leave-one-tournament-out (LOTO) backtests across 11 seasons (2014--2025, excluding 2020). The headline result: integrating Barttorvik's continuous adjusted efficiency metrics (AdjOE, AdjDE, NetRtg) broke through the ordinal rank ceiling identified in our initial experiments, yielding a multi-feature logistic regression with \textbf{Brier 0.159}---well below the Vegas benchmark of 0.175 and far exceeding our original target of $<$0.170.
+We spent most of Weeks 2--4 building models and watching them lose to logistic regression. Nine models, three tiers of complexity, leave-one-tournament-out backtests on 11 seasons. The turning point came when we scraped Barttorvik's continuous efficiency ratings~\citep{barttorvik2017} and fed them into the same logistic model that had been stuck at 0.196 Brier for two weeks. It dropped to 0.159. That's below Vegas ($\sim$0.175) and below our proposal target of $<$0.170, and we got there not by building a better model but by finding a better feature.
 
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Models}
 
-We implemented nine models across three tiers plus an optimized ensemble.
+\subsection{Baselines}
 
-\subsection{Tier 1: Baselines}
+We started with the obvious ones. Seed logistic ($P = \sigma(\beta_0 + \beta_1 \Delta s)$) gives 0.199. KenPom logistic, same form on POM ordinal rank difference, gives 0.196. These two anchored our expectations for the first two weeks: anything below 0.196 counts as progress.
 
-\paragraph{Seed Logistic.} $P(A \text{ wins}) = \sigma(\beta_0 + \beta_1 \Delta s)$ where $\Delta s$ is the seed difference. 0.199 Brier, consistent with literature.
+We also built an Elo rating system ($K = 24$, 75-point home-court, 50\% inter-season regression, margin-of-victory multiplier). It scored 0.221. We tried tuning the parameters but the problem is more basic than that. Elo only knows who won each game and by how much. It cannot distinguish a 10-point win over Houston from a 10-point win over a team ranked 250th. The MOV adjustment helps at the margins but Elo's information set is just too narrow.
 
-\paragraph{KenPom Logistic.} Same form on POM ordinal rank difference. 0.196 Brier. Only 0.003 better than seed, confirming the ordinal rank ceiling: integer ranks from 1 to 363 lose the continuous efficiency information that distinguishes close teams.
+We also tried a logistic model on our own self-computed tempo-adjusted efficiency (50 iterations of SOS fixed-point adjustment from box scores). 0.225. Worse than POM ordinal rank, which was discouraging. Our SOS model averages box scores and iterates; KenPom and Barttorvik use regression frameworks with home-court effects, tempo, and player availability data. The gap shows.
 
-\paragraph{Barttorvik Logistic.} Logistic regression on Barttorvik continuous net rating difference (AdjOE $-$ AdjDE). \textbf{0.169 Brier}. This single feature, by being continuous rather than ordinal, outperforms every model from our initial experiments. This was the single most impactful change in the project.
+The model that changed everything was Barttorvik logistic: a single feature, the continuous net rating difference (AdjOE $-$ AdjDE), in a logistic regression. 0.169 Brier. One continuous number outperformed every ordinal-rank model we had, including XGBoost on 53 features. We probably should have tried this two weeks earlier.
 
-\paragraph{Elo.} Season-long Elo with $K = 24$, home-court advantage of 75 Elo points, 50\% regression to the mean, and margin-of-victory adjustment ($K \times \log(|\text{margin}|+1) / \log 10$). 0.221 Brier. Despite tuning and MOV, Elo remains limited by its purely win/loss-based information.
+\subsection{Advanced models}
 
-\paragraph{Efficiency Logistic.} Logistic regression on our self-computed net efficiency difference. 0.225 Brier.
+XGBoost was our biggest disappointment before Barttorvik, and our biggest improvement after. The initial version scored 0.214 on 53 features, worse than a one-variable logistic. We had 27 rating columns from 9 Massey systems, all correlated above 0.95 with each other, and the model was splitting on this noise with 670 training games per fold. After adding 5 Barttorvik features, dropping 29 redundant columns, and tightening regularization (depth $4 \to 3$, trees $300 \to 150$, L1/L2 penalties), it came down to 0.172.
 
-\subsection{Tier 2: Advanced}
+The Multi-Feature Logistic takes 21 features (seed, POM rank diff, all 5 Barttorvik diffs, self-computed efficiency diffs, 8 Four Factors diffs, momentum, coach experience) through a StandardScaler into logistic regression. 0.159 Brier. We tried various values of $C$ and settled on $C = 0.5$. The relationship between team quality difference and win probability is close enough to sigmoidal that a linear model in log-odds space does fine once you give it the right inputs.
 
-\paragraph{XGBoost.} Gradient-boosted trees on a curated 24-feature set (down from 53), with stronger regularization: 150 estimators, max depth 3, min\_child\_weight 5, L1/L2 regularization. \textbf{0.172 Brier}, a dramatic improvement from the original 0.214. The improvement came from (1) adding Barttorvik continuous features, (2) removing 27 redundant correlated rank columns, and (3) stronger regularization to prevent overfitting on $\sim$670 training games per fold.
+The Mixture of Experts routes matchups to 4 specialized logistic experts based on seed gap (Chalk, Competitive, Toss-up, catch-all), trained via EM. 0.185, improved from 0.209 after Barttorvik features and a scaling fix from Week 2. The experts do learn different behaviors, but the gating doesn't add much over a single model.
 
-\paragraph{Multi-Feature Logistic.} Logistic regression with StandardScaler on 21 selected features including Barttorvik metrics, Four Factors, momentum, and coach tournament experience. \textbf{0.159 Brier}---our best single model, beating Vegas.
+We also rebuilt the Transformer from scratch. The Week 2 version (4 layers, 64-dim, no pretraining) scored 0.245, which was embarrassing. The new version uses 2 layers, 32-dim, about 8K parameters. We pretrain the encoder on $\sim$5K regular-season game pairs per season, freeze it, train the matchup MLP on tournament data, then unfreeze with a 10$\times$ smaller learning rate. 0.196 Brier. Pretraining made the difference between a model that learns nothing and one that matches the KenPom baseline, but it still can't touch the Barttorvik models because it doesn't have access to cross-team adjusted efficiency in its game embeddings.
 
-\paragraph{Mixture of Experts (K=4).} Gating network routes matchups to specialized logistic experts by seed gap. 0.185 Brier (improved from 0.209 via Barttorvik features).
+\subsection{Ensemble}
 
-\paragraph{Transformer (4-layer $\to$ 2-layer, pretrained).} We redesigned the Transformer with a smaller architecture (d\_model=32, 2 layers, 2 heads, $\sim$8K parameters) and added a three-phase training pipeline: (1) pretrain encoder on $\sim$5K regular-season game pairs per season with causal masking, (2) freeze encoder and train matchup MLP on tournament data, (3) unfreeze with 0.1$\times$ learning rate for joint fine-tuning. \textbf{0.196 Brier}, improved from 0.245. Pretraining on regular-season data was essential---without it, the model could not learn meaningful representations from only 736 tournament games.
-
-\subsection{Tier 3: Meta}
-
-\paragraph{Weighted Ensemble.} Optimized weighted average of the top 4 models (Multi-Feature Logistic, Barttorvik Logistic, Seed Logistic, XGBoost), with weights optimized per LOTO fold via inner leave-one-season-out cross-validation to minimize Brier score. 0.161 Brier. The optimizer consistently assigned 80--95\% weight to Multi-Feature Logistic, indicating that the logistic model already captures most available signal. The ensemble provides marginal improvement on some seasons but does not consistently beat the best single model.
+We took 4 models (Multi-Feature Logistic, Barttorvik Logistic, Seed Logistic, XGBoost), trained them per LOTO fold, and ran an inner leave-one-season-out loop to optimize blend weights via scipy. 0.161 Brier. Not much help. The optimizer puts 80--95\% weight on Multi-Feature Logistic in every fold, meaning the ensemble is basically the logistic model with a tiny correction. We ran it anyway because we wanted to confirm there wasn't hidden complementary signal in the other models. There isn't.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Feature Improvements}
+\section{Barttorvik Integration}
 
-\subsection{Barttorvik Continuous Efficiency Ratings}
+This deserves its own section because it was the turning point. We built a scraping pipeline that fetches T-Rank data for all D1 teams for each season from 2014 to 2025. The site uses JavaScript browser verification, so the scraper posts a \texttt{js\_test\_submitted} form field to get through. Team names from Barttorvik don't match Kaggle's TeamIDs exactly (``Miami FL'' vs ``Miami (FL)'', ``NC State'' vs ``North Carolina St'', that sort of thing), so we fuzzy-match against the \texttt{MTeamSpellings.csv} mapping using \texttt{rapidfuzz} for anything that doesn't match directly. Results get cached to \texttt{data/external/barttorvik\_\{season\}.csv}.
 
-This was the breakthrough feature of the project. We built an automated scraping pipeline that fetches Barttorvik T-Rank data for all D1 teams across seasons 2014--2025, handles JavaScript browser verification, parses HTML tables, and fuzzy-matches team names to Kaggle TeamIDs using the \texttt{MTeamSpellings.csv} mapping (with \texttt{rapidfuzz} for unmatched names). Results are cached to \texttt{data/external/barttorvik\_\{season\}.csv}.
+Five matchup features come out: net rating diff (AdjOE $-$ AdjDE), offensive efficiency diff, defensive efficiency diff, Barthag (Pythagorean win probability) diff, and tempo diff. The reason these work so much better than ordinal ranks is simple. A team with AdjOE of 118.5 and one at 114.2 differ by 4.3 points per 100 possessions. That 4.3 is information. Ordinal ranks throw it away: both teams might be ranked in the top 20, five spots apart, but the rank difference of 5 is the same whether the efficiency gap is 0.3 or 8.0.
 
-Five new matchup features were added:
-\begin{itemize}[nosep]
-    \item \texttt{bart\_net\_diff}: Net rating difference (AdjOE $-$ AdjDE). The single most predictive feature.
-    \item \texttt{bart\_adjoe\_diff}: Adjusted offensive efficiency difference.
-    \item \texttt{bart\_adjde\_diff}: Adjusted defensive efficiency difference.
-    \item \texttt{bart\_barthag\_diff}: Barthag (win probability proxy) difference.
-    \item \texttt{bart\_tempo\_diff}: Adjusted tempo difference.
-\end{itemize}
-
-The key insight is that Barttorvik's AdjOE/AdjDE are \emph{continuous} efficiency margins (points per 100 possessions), not ordinal ranks. The difference between the \#1 and \#5 team might be 8 points of net rating, while the difference between \#50 and \#55 might be 0.3 points. Ordinal ranks cannot distinguish these cases; continuous ratings can. This single change reduced our best Brier score from 0.196 to 0.169 (single feature) and 0.159 (multi-feature).
-
-\subsection{Four Factors}
-
-Dean Oliver's Four Factors from Update~\#1 remain in the feature set. They contribute modestly when Barttorvik features are present, as Barttorvik's adjusted metrics already incorporate similar information.
-
-\subsection{Coach Tournament Experience}
-
-We added two features from \texttt{MTeamCoaches.csv}: the number of prior NCAA tournament appearances for each team's head coach, and total coaching seasons. The impact was negligible ($<$0.001 Brier), suggesting that coach experience is already captured by team quality metrics.
-
-\subsection{Feature Selection for XGBoost}
-
-We curated the XGBoost feature set from 53 to 24 features by: (1) dropping individual \texttt{rank\_A/rank\_B} columns (keeping only diffs), reducing 27 rating columns to 9; (2) keeping only 3 of 9 rating systems (POM, SAG, RPI) since the others are $>$0.95 correlated; (3) adding all 5 Barttorvik features. Combined with stronger regularization, this fixed the XGBoost overfitting problem (0.214 $\to$ 0.172).
+Going from POM ordinal (0.196) to Barttorvik net rating (0.169) was a 0.027-point improvement from changing one feature in the same logistic model. Adding the remaining Barttorvik features plus Four Factors, momentum, and coach data into a 21-feature logistic pushed it to 0.159.
 
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Backtest Results}
 
-Table~\ref{tab:loto} reports the full LOTO results.
+Table~\ref{tab:loto} has the full numbers.
 
 \begin{table}[h]
 \centering
-\caption{Leave-one-tournament-out Brier scores (2014--2025, 11 folds). Lower is better. Benchmarks: coin flip = 0.250, seed baseline $\approx$ 0.200, Vegas $\approx$ 0.175.}
+\caption{LOTO Brier scores (2014--2025, 11 folds). Coin flip = 0.250, seed baseline $\approx$ 0.200, Vegas $\approx$ 0.175.}
 \label{tab:loto}
 \small
 \begin{tabular}{@{}lccc@{}}
 \toprule
-\textbf{Model} & \textbf{Mean Brier} & \textbf{Std} & \textbf{Best / Worst Season} \\
+\textbf{Model} & \textbf{Mean Brier} & \textbf{Std} & \textbf{Best / Worst} \\
 \midrule
-Multi-Feature Logistic & \textbf{0.159} & 0.020 & 2025 / 2023 \\
+Multi-Feature Logistic & 0.159 & 0.020 & 2025 / 2023 \\
 Weighted Ensemble & 0.161 & 0.021 & 2025 / 2014 \\
 Barttorvik Logistic & 0.169 & 0.022 & 2025 / 2018 \\
 XGBoost (regularized) & 0.172 & 0.025 & 2025 / 2014 \\
-Mixture of Experts (K=4) & 0.185 & 0.023 & 2025 / 2023 \\
-Transformer (pretrained) & 0.196 & 0.024 & 2025 / 2014 \\
+Mixture of Experts & 0.185 & 0.023 & 2025 / 2023 \\
 KenPom Logistic & 0.196 & 0.017 & 2025 / 2021 \\
+Transformer (pretrained) & 0.196 & 0.024 & 2025 / 2014 \\
 Seed Logistic & 0.199 & 0.021 & 2025 / 2021 \\
 Elo (MOV-adjusted) & 0.221 & 0.029 & 2014 / 2021 \\
 Efficiency Logistic & 0.225 & 0.016 & 2015 / 2022 \\
@@ -152,47 +127,29 @@ Efficiency Logistic & 0.225 & 0.016 & 2015 / 2022 \\
 \end{tabular}
 \end{table}
 
-Several patterns emerge. First, the top four models all use Barttorvik continuous features, confirming that this was the decisive improvement. Second, the Weighted Ensemble (0.161) barely beats the best single model (0.159), because the optimizer assigns 80--95\% weight to Multi-Feature Logistic. Third, the Transformer improved dramatically from 0.245 to 0.196 with pretraining, but still cannot compete with the statistical models that use expert-constructed features like Barttorvik ratings.
+Everything above the line at 0.185 uses Barttorvik. Everything below it doesn't. 2025 was the best season for every single model because the bracket played out mostly to seed (three of the Final Four were 1 or 2 seeds). 2021 was the hardest for most models. That was the first tournament after COVID canceled 2020 entirely, so rosters were unusual, non-conference schedules were limited, and the selection committee was working with less information than normal.
 
-Year-to-year variance remains large (std $\approx 0.02$), comparable to model gaps. 2025 was the best season for every model (unusually chalky tournament), while 2021 and 2014 were consistently the hardest.
+The year-to-year noise is worth paying attention to. Standard deviations run around 0.02. That means our ``best model'' at 0.159 will look like a 0.180 model in a wild tournament and a 0.140 model in a chalky one. A single 16-over-1 upset (UMBC over Virginia in 2018) costs about 0.01 Brier for the entire season. In a 67-game tournament, one game is roughly 1.5\% of your score.
 
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{What Worked and What Didn't}
+\section{Discussion}
 
-\subsection{Breaking the ordinal rank ceiling}
+The main thing we took away from these three weeks is that feature quality matters more than we expected and model complexity matters less. We built an MoE, a Transformer, an ensemble with inner-loop weight optimization. The thing that actually worked was plugging a better number into logistic regression.
 
-This was the project's central breakthrough. Our initial experiments hit a wall at Brier 0.196 because every feature was an integer rank. Barttorvik's continuous AdjOE/AdjDE/NetRtg immediately broke through this ceiling. A single continuous feature (net rating difference) at 0.169 outperforms 53 ordinal features fed to XGBoost (0.214). The lesson is clear: \emph{feature quality dominates model complexity}.
+In hindsight this shouldn't have been surprising. \citet{pomeroy2004} and past Kaggle winners have said the same thing: the competition is won on features, not models. But we had to learn it ourselves. We spent two weeks stuck at 0.196, trying fancier architectures, before realizing the ceiling was in the data, not the model.
 
-\subsection{XGBoost: less is more}
+A few other observations from the backtest. XGBoost with 53 features (0.214) loses to logistic regression on 1 feature (0.196). That's not because XGBoost is a bad algorithm. It's because 27 of those 53 features are near-duplicates, and with only 670 training games per fold, the model fits the redundancy instead of the signal. After we cut to 24 curated features it dropped to 0.172. Still not as good as logistic on the same features (0.159), but respectable. Tree models overfit more easily on small datasets, and 670 tournament games is very small.
 
-XGBoost improved from 0.214 to 0.172 through three changes: (1) adding 5 Barttorvik features, (2) removing 29 redundant rank columns, (3) stronger regularization. The regularization changes alone (depth 4$\to$3, 300$\to$150 trees, added L1/L2) would not have helped without the feature improvements. XGBoost needs good features even more than simple models do, because it has more capacity to overfit on noise.
+The Transformer's trajectory is also worth noting. It went from 0.245 without pretraining to 0.196 with pretraining on regular-season data. That's the difference between a model that can't learn from 736 examples and one that can, because the encoder comes into fine-tuning already knowing what a ``strong team'' looks like from having seen 50,000 regular-season games. But 0.196 still only matches the KenPom logistic baseline, because the Transformer's game embeddings don't include the cross-team efficiency adjustments that Barttorvik provides. It knows a team's FG\% and turnover rate in each game, but it doesn't know what those numbers mean relative to the quality of the opponent's defense. We suspect adding Barttorvik features to the game embeddings would close this gap, and that's on the list for the final phase.
 
-\subsection{Transformer pretraining: necessary but not sufficient}
-
-Pretraining on $\sim$5K regular-season game pairs per season reduced the Transformer from 0.245 to 0.196. The three-phase training pipeline (pretrain, freeze+finetune, unfreeze with low LR) was essential. However, 0.196 only matches KenPom Logistic. The Transformer captures temporal dynamics (momentum, trajectory) but cannot access the cross-team adjusted efficiency information that Barttorvik provides. A future direction is to include Barttorvik features in the game embedding.
-
-\subsection{Ensemble: diminishing returns}
-
-The optimized ensemble (0.161) barely improves on Multi-Feature Logistic (0.159). The weight optimizer consistently puts $>$80\% on the logistic model, meaning the other models contribute little unique signal once Barttorvik features are included. This suggests we are near the information ceiling of our feature set.
-
-\subsection{Calibration and coach features: negligible impact}
-
-Isotonic calibration on XGBoost slightly \emph{worsened} performance (0.172 $\to$ 0.174), suggesting the model is already well-calibrated. Coach tournament experience features contributed $<$0.001 Brier improvement, indicating that team quality metrics already subsume coaching effects.
+The ensemble at 0.161 barely moves the needle over the best single model at 0.159. The optimizer consistently puts almost all weight on Multi-Feature Logistic. That probably means we've extracted most of what these features have to offer. Getting below 0.150 would likely require player-level data (who's injured, who's in foul trouble historically, matchup-specific defensive stats) or proprietary information we don't have access to.
 
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Next Steps}
 
-Three directions for the final phase (Weeks 4--6):
-
-\begin{enumerate}[nosep]
-    \item \textbf{Hybrid Transformer.} Inject Barttorvik features into the Transformer's game embeddings or add them as a separate static branch concatenated with the CLS token. This could combine the Transformer's temporal modeling with the logistic model's feature advantage.
-    \item \textbf{Market calibration.} Integrate historical betting odds via the \texttt{MarketCalibratedEnsemble} (already implemented but unused) for Bayesian fusion of model predictions with market-implied probabilities.
-    \item \textbf{2026 tournament prediction.} Generate bracket predictions for the live 2026 tournament and submit to the Kaggle March Machine Learning Mania competition.
-\end{enumerate}
-
-Our current best (0.159) is competitive with top Kaggle entries. The remaining gap to the theoretical optimum ($\sim$0.140--0.150 estimated from betting market efficiency) likely requires player-level features or proprietary data that we do not have access to.
+The final phase runs through May 1. We want to try injecting Barttorvik features into the Transformer's game embeddings to see if temporal modeling and efficiency data can combine for something better than either alone. We'll also wire up the Bayesian market-calibration module (already implemented but unused) with historical betting lines. And we need to generate actual 2026 bracket predictions for the Kaggle submission. Our 0.159 is competitive with past top-10 Kaggle entries, so we're cautiously optimistic, but a lot depends on whether 2026 is a chalk year or a chaos year.
 
 
 % ══════════════════════════════════════════════════════════════════════════
