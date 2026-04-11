@@ -89,6 +89,22 @@ class EfficiencyLogistic(BaseEstimator, ClassifierMixin):
         return self.model.predict_proba(col)
 
 
+class BarttovikLogistic(BaseEstimator, ClassifierMixin):
+    """Logistic regression on Barttorvik continuous net rating difference."""
+
+    def __init__(self):
+        self.model = LogisticRegression()
+
+    def fit(self, X, y):
+        col = X[["bart_net_diff"]].fillna(0)
+        self.model.fit(col, y)
+        return self
+
+    def predict_proba(self, X):
+        col = X[["bart_net_diff"]].fillna(0)
+        return self.model.predict_proba(col)
+
+
 class MultiFeatureLogistic(BaseEstimator, ClassifierMixin):
     """Logistic regression on selected continuous features with scaling."""
 
@@ -98,6 +114,8 @@ class MultiFeatureLogistic(BaseEstimator, ClassifierMixin):
         "opp_efg_pct_diff", "opp_to_pct_diff", "opp_or_pct_diff", "opp_ft_rate_diff",
         "rank_diff_POM",
         "momentum_margin_diff", "momentum_winpct_diff",
+        "bart_net_diff", "bart_adjoe_diff", "bart_adjde_diff", "bart_barthag_diff",
+        "coach_tourney_apps_diff",
     ]
 
     def __init__(self, C=1.0):
@@ -120,12 +138,13 @@ class MultiFeatureLogistic(BaseEstimator, ClassifierMixin):
 
 
 class EloRating:
-    """Season-long Elo rating system with tunable K-factor and HCA."""
+    """Season-long Elo rating system with tunable K-factor, HCA, and MOV."""
 
-    def __init__(self, k: float = 20.0, hca: float = 100.0, regression: float = 0.6):
+    def __init__(self, k: float = 24.0, hca: float = 75.0, regression: float = 0.5, mov: bool = True):
         self.k = k
         self.hca = hca
         self.regression = regression
+        self.mov = mov
         self.ratings: dict[int, float] = {}
 
     def expected(self, team_a: int, team_b: int, home_a: bool = False) -> float:
@@ -134,9 +153,11 @@ class EloRating:
         adj = self.hca if home_a else 0
         return 1.0 / (1.0 + 10 ** ((rb - ra - adj) / 400))
 
-    def update(self, winner: int, loser: int, home_winner: bool = False):
+    def update(self, winner: int, loser: int, home_winner: bool = False, margin: float = 0):
         e = self.expected(winner, loser, home_winner)
-        delta = self.k * (1 - e)
+        # Margin-of-victory multiplier: log(|margin| + 1) scaled
+        mov_mult = np.log(abs(margin) + 1) / np.log(10) if self.mov and margin > 0 else 1.0
+        delta = self.k * mov_mult * (1 - e)
         self.ratings[winner] = self.ratings.get(winner, 1500) + delta
         self.ratings[loser] = self.ratings.get(loser, 1500) - delta
 
@@ -157,15 +178,16 @@ class EloSklearnWrapper(BaseEstimator, ClassifierMixin):
     season). This is not leakage because we only hold out tournament outcomes.
     """
 
-    def __init__(self, data, k=20.0, hca=100.0, regression=0.6):
+    def __init__(self, data, k=24.0, hca=75.0, regression=0.5, mov=True):
         self.data = data
         self.k = k
         self.hca = hca
         self.regression = regression
+        self.mov = mov
         self.elo = None
 
     def fit(self, X, y):
-        self.elo = EloRating(k=self.k, hca=self.hca, regression=self.regression)
+        self.elo = EloRating(k=self.k, hca=self.hca, regression=self.regression, mov=self.mov)
         reg = self.data["regular_compact"]
 
         # Process all seasons up to max_train+1 to cover holdout regular season
@@ -180,7 +202,8 @@ class EloSklearnWrapper(BaseEstimator, ClassifierMixin):
             games = reg[reg["Season"] == season].sort_values("DayNum")
             for _, g in games.iterrows():
                 home = g.get("WLoc", "N") == "H"
-                self.elo.update(g["WTeamID"], g["LTeamID"], home)
+                margin = g["WScore"] - g["LScore"]
+                self.elo.update(g["WTeamID"], g["LTeamID"], home, margin)
         return self
 
     def predict_proba(self, X):
@@ -196,7 +219,19 @@ class EloSklearnWrapper(BaseEstimator, ClassifierMixin):
 # ---------------------------------------------------------------------------
 
 class GradientBoostingModel(BaseEstimator, ClassifierMixin):
-    """XGBoost/LightGBM on full feature set."""
+    """XGBoost/LightGBM on curated feature set with regularization."""
+
+    # Curated features: avoid redundant rank_A/rank_B, keep diffs + Barttorvik
+    _CURATED_FEATURES = [
+        "seed_diff",
+        "rank_diff_POM", "rank_diff_SAG", "rank_diff_RPI",
+        "bart_net_diff", "bart_adjoe_diff", "bart_adjde_diff", "bart_barthag_diff", "bart_tempo_diff",
+        "net_eff_diff", "off_eff_diff", "def_eff_diff", "tempo_diff",
+        "efg_pct_diff", "to_pct_diff", "or_pct_diff", "ft_rate_diff",
+        "opp_efg_pct_diff", "opp_to_pct_diff", "opp_or_pct_diff", "opp_ft_rate_diff",
+        "momentum_winpct_diff", "momentum_margin_diff",
+        "coach_tourney_apps_diff",
+    ]
 
     def __init__(self, framework: str = "xgboost"):
         self.framework = framework
@@ -204,8 +239,13 @@ class GradientBoostingModel(BaseEstimator, ClassifierMixin):
         self.feature_cols_ = None
 
     def fit(self, X, y):
+        self.classes_ = np.array([0, 1])
         X_feat = _drop_id_cols(X)
         if isinstance(X_feat, pd.DataFrame):
+            # Use curated features if available, else fall back to all
+            available = [c for c in self._CURATED_FEATURES if c in X_feat.columns]
+            if len(available) >= 10:
+                X_feat = X_feat[available]
             self.feature_cols_ = list(X_feat.columns)
             X_feat = X_feat.values
         else:
@@ -214,11 +254,14 @@ class GradientBoostingModel(BaseEstimator, ClassifierMixin):
         if self.framework == "xgboost":
             import xgboost as xgb
             self.model = xgb.XGBClassifier(
-                n_estimators=300,
-                max_depth=4,
+                n_estimators=150,
+                max_depth=3,
                 learning_rate=0.05,
                 subsample=0.8,
-                colsample_bytree=0.8,
+                colsample_bytree=0.7,
+                min_child_weight=5,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
                 eval_metric="logloss",
                 verbosity=0,
             )
@@ -226,11 +269,14 @@ class GradientBoostingModel(BaseEstimator, ClassifierMixin):
         else:
             import lightgbm as lgb
             self.model = lgb.LGBMClassifier(
-                n_estimators=300,
-                max_depth=4,
+                n_estimators=150,
+                max_depth=3,
                 learning_rate=0.05,
                 subsample=0.8,
-                colsample_bytree=0.8,
+                colsample_bytree=0.7,
+                min_child_weight=5,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
                 verbosity=-1,
             )
             self.model.fit(X_feat, y)
@@ -238,7 +284,9 @@ class GradientBoostingModel(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, X):
         X_feat = _drop_id_cols(X)
-        if isinstance(X_feat, pd.DataFrame):
+        if isinstance(X_feat, pd.DataFrame) and self.feature_cols_ is not None:
+            X_feat = X_feat[self.feature_cols_].values
+        elif isinstance(X_feat, pd.DataFrame):
             X_feat = X_feat.values
         return self.model.predict_proba(X_feat)
 
@@ -376,6 +424,50 @@ class WeightedEnsemble:
             constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1},
         )
         self.weights = list(result.x / result.x.sum())
+
+
+class CalibratedModel(BaseEstimator, ClassifierMixin):
+    """Post-hoc calibration wrapper using isotonic regression on OOF predictions."""
+
+    def __init__(self, base_factory, n_folds=5):
+        self.base_factory = base_factory
+        self.n_folds = n_folds
+        self.model = None
+        self.calibrator = None
+
+    def fit(self, X, y):
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.model_selection import KFold
+
+        # Collect OOF predictions for calibration
+        oof_preds = np.full(len(y), 0.5)
+        kf = KFold(n_splits=self.n_folds, shuffle=True, random_state=42)
+
+        X_arr = X
+        for train_idx, val_idx in kf.split(X_arr):
+            if isinstance(X, pd.DataFrame):
+                X_tr, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            else:
+                X_tr, X_val = X[train_idx], X[val_idx]
+            y_tr = y[train_idx]
+
+            fold_model = self.base_factory()
+            fold_model.fit(X_tr, y_tr)
+            oof_preds[val_idx] = fold_model.predict_proba(X_val)[:, 1]
+
+        # Fit isotonic calibrator on OOF predictions
+        self.calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.01, y_max=0.99)
+        self.calibrator.fit(oof_preds, y)
+
+        # Fit final model on all data
+        self.model = self.base_factory()
+        self.model.fit(X, y)
+        return self
+
+    def predict_proba(self, X):
+        raw = self.model.predict_proba(X)[:, 1]
+        calibrated = self.calibrator.predict(raw)
+        return np.column_stack([1 - calibrated, calibrated])
 
 
 class MarketCalibratedEnsemble:

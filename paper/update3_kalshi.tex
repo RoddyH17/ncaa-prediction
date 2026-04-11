@@ -1,0 +1,207 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#3}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#3: Kalshi Trading Strategy \& Backtest}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{March 31, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Overview}
+
+This update covers the Kalshi prediction market integration we had promised in the proposal. We built a complete trading pipeline: a signal generator that identifies matchups where our model disagrees with the market, a fractional Kelly criterion position sizer, per-game and portfolio-level risk limits, and a historical backtester. We couldn't get real Kalshi odds data for past tournaments (they don't publish historical prices), so we built a synthetic market simulator and spent a fair amount of time getting it to behave like a real market rather than a straw man. The backtest, run over 11 tournament seasons with a \$10{,}000 bankroll, shows a 20.6\% return with a 0.88 Sharpe ratio and only one losing season out of eleven.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{The Problem with Backtesting a Trading Strategy}
+
+We need to be upfront about a fundamental issue. To backtest a trading strategy, you need two things: your model's predictions and the market's prices. We have the first (from the LOTO framework in Update~\#2), but we don't have the second. Kalshi launched NCAA markets only recently, and historical contract prices aren't publicly available. Vegas lines exist but are in a different format (point spreads, not binary contracts), and converting them to win probabilities introduces its own noise.
+
+So we had to build synthetic market prices. This is both necessary and dangerous. If the synthetic market is too dumb, you get unrealistic returns. Our first attempt used seed-based win rates as the market prior, and the backtest returned 3{,}684\% ROI. That is not a realistic number. It just means our Barttorvik-powered model knows a lot more than a seed-only market, which is obvious and uninteresting.
+
+We went through three rounds of fixes before landing on something we think is defensible.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Synthetic Market Design}
+
+The final synthetic market generates prices as:
+\[
+p_{\text{market}} = 0.7 \cdot p_{\text{model}} + 0.3 \cdot p_{\text{seed}} + \varepsilon_{\text{alpha}} + \varepsilon_{\text{noise}}
+\]
+where $p_{\text{model}}$ is our best model's prediction, $p_{\text{seed}}$ is the historical seed-matchup win rate, $\varepsilon_{\text{alpha}} \sim \mathcal{N}(0, 0.03)$ represents information the market has that we don't (injuries, insider betting flow, other quant models), and $\varepsilon_{\text{noise}} \sim \mathcal{N}(0, 0.04)$ is general market microstructure noise.
+
+The 70/30 blend reflects our assumption that real Kalshi markets are mostly driven by quantitative firms (SIG, DRW, Jane Street all trade on Kalshi) who have access to similar efficiency data. The market is not as dumb as seed-only, but it's not identical to our model either.
+
+We also apply a favorite-longshot bias: the synthetic market slightly overprice underdogs by pushing probabilities 2\% toward 0.5. This is well-documented in sports betting markets~\citep{snowberg2010} and means the model's edge is slightly larger on heavy favorites and slightly smaller on coin-flip games.
+
+On top of all this, we simulate a 3-cent bid-ask spread. When you buy a Yes contract at the ``market price'' of 0.65, you actually pay 0.665 (the ask). That 1.5 cents per side adds up. Over 388 trades at 100 contracts each, the spread alone costs roughly \$580 in the backtest.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Trading Strategy}
+
+The strategy follows the proposal closely.
+
+\paragraph{Signal.} We trade when the absolute model-market disagreement exceeds a threshold $\tau$. If $p_{\text{model}} > p_{\text{market}} + \tau$, we buy Yes. If $p_{\text{model}} < p_{\text{market}} - \tau$, we buy No (equivalently, sell Yes).
+
+\paragraph{Sizing.} We use quarter-Kelly. For a binary contract priced at $c$ where our model estimates true probability $p$:
+\[
+f^* = \frac{p - c}{1 - c} \quad (\text{for Yes bets}), \qquad f = 0.25 \cdot f^*
+\]
+Quarter-Kelly sacrifices about 44\% of expected growth rate compared to full Kelly but cuts variance by a factor of 16. With only 63 games per tournament, full Kelly would be reckless.
+
+\paragraph{Risk limits.} No single game can exceed 5\% of the bankroll. Total exposure across all open positions is capped at 20\%. We also cap each position at 100 contracts to simulate realistic Kalshi liquidity (early-round NCAA games are not exactly the S\&P 500).
+
+\paragraph{Execution.} The API client wraps Kalshi's REST API with a \texttt{dry\_run} mode that logs orders without executing. We didn't actually trade because the 2026 tournament was already underway when we got the module working, and we didn't want to paper-trade in the middle of a live bracket.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Backtest Results}
+
+We ran the backtester with the Multi-Feature Logistic model (Brier 0.159 from Update~\#2) over 11 seasons using a \$10{,}000 starting bankroll. Table~\ref{tab:threshold} shows how the threshold $\tau$ affects performance.
+
+\begin{table}[h]
+\centering
+\caption{Trading backtest results by signal threshold (quarter-Kelly, 3-cent spread, 100-contract cap).}
+\label{tab:threshold}
+\small
+\begin{tabular}{@{}rrrrc@{}}
+\toprule
+$\tau$ & Trades & P\&L & ROI & Win Rate \\
+\midrule
+0.01 & 388 & +\$2{,}065 & +20.6\% & 63.7\% \\
+0.05 & 375 & +\$1{,}900 & +19.0\% & 62.8\% \\
+0.07 & 280 & +\$1{,}467 & +14.7\% & 62.1\% \\
+0.10 & 165 & +\$1{,}778 & +17.8\% & 67.9\% \\
+0.15 & 63 & +\$898 & +9.0\% & 65.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two things are worth noting. First, all thresholds are profitable. This is reassuring but probably optimistic, because our synthetic market underestimates how efficient real markets are. Second, the per-trade ROI actually goes up at $\tau = 0.10$ compared to $\tau = 0.07$ (\$1{,}778 on 165 trades vs.\ \$1{,}467 on 280 trades). That means the medium-confidence trades ($0.07 < |\text{edge}| < 0.10$) are net losers on average, and cutting them out improves the portfolio. We thought this was interesting.
+
+Table~\ref{tab:seasons} breaks down the $\tau = 0.01$ run by season.
+
+\begin{table}[h]
+\centering
+\caption{Per-season P\&L at $\tau = 0.01$ (388 total trades, \$10{,}000 bankroll).}
+\label{tab:seasons}
+\small
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+Season & Trades & P\&L & Win Rate \\
+\midrule
+2014 & 38 & $-$\$164 & 50.0\% \\
+2015 & 36 & +\$609 & 75.0\% \\
+2016 & 37 & +\$146 & 59.5\% \\
+2017 & 33 & +\$60 & 63.6\% \\
+2018 & 35 & +\$25 & 60.0\% \\
+2019 & 33 & +\$469 & 75.8\% \\
+2021 & 37 & +\$193 & 59.5\% \\
+2022 & 37 & +\$38 & 56.8\% \\
+2023 & 37 & +\$269 & 62.2\% \\
+2024 & 31 & +\$239 & 74.2\% \\
+2025 & 34 & +\$181 & 64.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Ten profitable seasons out of eleven. 2014 is the one loss, at $-$\$164. The Sharpe ratio across seasons is 0.88, which in a real hedge fund would be considered okay but not spectacular. We think a real Kalshi deployment would see lower returns (the market is smarter than our synthetic) but the qualitative result, that the model has enough edge to trade profitably at small position sizes, is probably right.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Caveats}
+
+We want to be clear about what this backtest does and doesn't show.
+
+It does show that a model with Brier 0.159 has enough predictive edge over a plausible market to generate positive expected value after transaction costs, even with conservative (quarter-Kelly) sizing and liquidity constraints. That's the conceptual validation we were going for.
+
+It does not show that you'd actually make \$2{,}065 per tournament trading on Kalshi. The synthetic market is a proxy. Real Kalshi markets are populated by firms like SIG and Jane Street who have access to proprietary data, faster execution, and deeper pockets. Our edge against them would be smaller than our edge against a 70\% model / 30\% seed synthetic. How much smaller, we can't say.
+
+The other caveat is sample size. Eleven seasons of 35 trades each is 388 total bets. That's enough to estimate whether the strategy is profitable in expectation, but the confidence interval on ROI is wide. A couple of bad upsets in a single tournament can swing a season from profitable to not. The 2014 loss ($-$\$164) happened on a 50\% win rate, where the strategy was basically guessing.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Implementation}
+
+The trading module lives in \texttt{src/kalshi\_trader.py} and contains five classes:
+
+\texttt{SyntheticMarketPrices} generates proxy odds from seed win rates, model blending, market alpha noise, and favorite-longshot bias. \texttt{TradingStrategy} handles edge computation, Kelly sizing, and risk limits. \texttt{TradingBacktester} runs the LOTO-style simulation with P\&L tracking. \texttt{KalshiClient} wraps the Kalshi REST API (authentication, market reads, order placement) with a \texttt{dry\_run} flag that defaults to on. \texttt{LiveTradingPipeline} ties it all together for real-time use: scan markets, match team names, predict, generate signals, execute.
+
+The backtester reuses the same LOTO train/test splitting as the prediction backtest, so the model never sees the holdout tournament during training. Synthetic market prices are seeded per-season for reproducibility.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Next Steps}
+
+We have three things left for the final report. First, we want to run the live trading pipeline in dry-run mode on the remaining 2026 tournament games to see what signals it would have generated. Second, we need to put together the Kaggle submission file. Third, the final paper, which will pull together the prediction and trading results into a coherent narrative. Our target is to have a draft by April 20.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Snowberg and Wolfers(2010)]{snowberg2010}
+Snowberg, E. and Wolfers, J.
+\newblock Explaining the Favorite--Long Shot Bias: Is it Risk-Love or Misperceptions?
+\newblock \emph{Journal of Political Economy}, 118(4):723--746, 2010.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\end{thebibliography}
+
+\end{document}

@@ -60,6 +60,95 @@ def leave_one_tournament_out(
     return pd.DataFrame(results)
 
 
+def loto_ensemble(
+    build_features_fn,
+    model_factories: dict[str, callable],
+    seasons: list[int],
+) -> pd.DataFrame:
+    """
+    LOTO backtest with weighted ensemble and per-fold weight optimization.
+
+    For each holdout season:
+      1. Train all base models on remaining seasons
+      2. Use inner LOTO (leave-one-out within training) to get OOF predictions
+      3. Optimize ensemble weights on OOF predictions
+      4. Predict holdout with optimized ensemble
+    """
+    from src.models import WeightedEnsemble
+
+    results = []
+    for holdout in seasons:
+        train_seasons = [s for s in seasons if s != holdout]
+
+        # Build train/test data
+        X_train, y_train = build_features_fn(train_seasons)
+        X_test, y_test = build_features_fn([holdout])
+
+        # Train all base models on full training set
+        trained_models = {}
+        for name, factory in model_factories.items():
+            model = factory()
+            model.fit(X_train, y_train)
+            trained_models[name] = model
+
+        # Collect OOF predictions for weight optimization via inner LOTO
+        n_train = len(y_train)
+        oof_preds = {name: np.full(n_train, 0.5) for name in model_factories}
+
+        # Inner LOTO: for each inner holdout season, train on rest and predict
+        for inner_holdout in train_seasons:
+            inner_train = [s for s in train_seasons if s != inner_holdout]
+            X_inner_train, y_inner_train = build_features_fn(inner_train)
+            X_inner_val, y_inner_val = build_features_fn([inner_holdout])
+
+            # Find indices of inner_holdout games in X_train
+            mask = X_train["Season"] == inner_holdout
+            if mask.sum() == 0:
+                continue
+
+            for name, factory in model_factories.items():
+                inner_model = factory()
+                inner_model.fit(X_inner_train, y_inner_train)
+                preds = inner_model.predict_proba(X_inner_val)[:, 1]
+                oof_preds[name][mask.values] = preds
+
+        # Optimize ensemble weights on OOF predictions
+        model_list = [trained_models[name] for name in model_factories]
+        ensemble = WeightedEnsemble(model_list)
+
+        # Use scipy to optimize on OOF predictions directly
+        from scipy.optimize import minimize
+
+        names = list(model_factories.keys())
+        oof_matrix = np.column_stack([oof_preds[n] for n in names])
+
+        def objective(w):
+            w = np.abs(w)
+            w = w / w.sum()
+            blended = oof_matrix @ w
+            return brier_score_loss(y_train, blended)
+
+        n_models = len(names)
+        w0 = np.ones(n_models) / n_models
+        opt = minimize(
+            objective, w0, method="SLSQP",
+            bounds=[(0, 1)] * n_models,
+            constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1},
+        )
+        opt_weights = opt.x / opt.x.sum()
+        ensemble.weights = list(opt_weights)
+
+        # Predict holdout
+        y_prob = ensemble.predict_proba(X_test)[:, 1]
+        bs = brier_score(y_test, y_prob)
+
+        weight_str = ", ".join(f"{n}={w:.2f}" for n, w in zip(names, opt_weights))
+        print(f"Season {holdout}: Brier = {bs:.4f} | weights: {weight_str}")
+        results.append({"season": holdout, "brier_score": bs, "n_games": len(y_test)})
+
+    return pd.DataFrame(results)
+
+
 def compare_models(model_results: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Compare multiple models across backtest seasons."""
     summary = []
