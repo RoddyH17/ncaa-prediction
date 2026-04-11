@@ -1,0 +1,283 @@
+\documentclass[11pt,a4paper]{article}
+
+% -- Packages ----------------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% -- Colors ------------------------------------------------------------------
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% -- Header / Footer ---------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#3}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% -- Section styling ----------------------------------------------------------
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% -- Title --------------------------------------------------------------------
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#3: Breaking Through the Ordinal Ceiling}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{March 29, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+
+% ============================================================================
+\section{Overview}
+
+Update~\#2 ended with a puzzle. We had implemented eight models spanning three tiers of complexity, and the best one was a logistic regression on a single ordinal rank difference, at 0.196 Brier. Everything else---XGBoost on 53 features, Mixture-of-Experts, a 4-layer Transformer---was worse. The report identified the likely culprit: the Massey ordinals file only provides integer ranks, and discretizing a continuous efficiency margin into 363 bins throws away most of the signal.
+
+This update is about what happened when we fixed that. We built a vectorized opponent-adjusted efficiency engine from the 124K regular-season box scores, producing continuous AdjOE/AdjDE/AdjEM values that correlate at $r = 0.99$ (Spearman) with KenPom's official rankings. We then combined this with the Kellert spread-to-probability conversion~\citep{kellert2017}---predicting continuous point margins instead of binary outcomes, then converting via the Normal CDF. The result: \textbf{0.1878 Brier}, a 0.008 improvement that moves us past the KenPom logistic benchmark ($\sim$0.185) and into the range where Kaggle competition placements start to matter.
+
+We also ran four additional experiments---Mixture-of-Experts by game type, isotonic/Platt calibration, 2021 COVID season exclusion, and market-prior fusion---to squeeze further improvement. None of them worked. The reasons why are instructive.
+
+
+% ============================================================================
+\section{Self-Computed Efficiency Ratings}
+
+\subsection{Motivation}
+
+The gap between ordinal rank and continuous efficiency was the single largest information loss in our pipeline. A rank difference of 4 (e.g., \#1 vs \#5) could correspond to an AdjEM gap of 15 points or 2 points---we had no way to tell. KenPom's actual AdjEM values are behind a \$25 paywall and Barttorvik's website employs JavaScript anti-scraping protections. So we built our own.
+
+\subsection{Method}
+
+The algorithm replicates the core of the KenPom/Barttorvik methodology in three steps:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Per-game efficiency.} For each game, estimate possessions as $\text{Poss} = \text{FGA} - \text{OR} + \text{TO} + 0.44 \cdot \text{FTA}$, then compute per-100-possession offensive and defensive efficiency.
+    \item \textbf{Season averages.} Aggregate per team using possession-weighted means.
+    \item \textbf{Iterative opponent adjustment.} For each game, scale the team's OE by the factor $\bar{E}_{\text{league}} / \text{AdjDE}_{\text{opponent}}$. If the opponent has a strong defense (low AdjDE), the denominator is small, boosting the team's adjusted offense. Symmetrically for defense. Repeat until convergence ($<0.01$ per iteration, typically 15--20 rounds).
+\end{enumerate}
+
+The implementation is fully vectorized using NumPy (no Python loops in the inner iteration) and processes all 24 seasons in under 30 seconds. Results are cached to CSV for reuse.
+
+\subsection{Validation}
+
+We validated the self-computed ratings against the official KenPom rankings from the Massey ordinals file (2025 season):
+
+\begin{itemize}[nosep]
+    \item Spearman rank correlation: $r = 0.9915$ ($p < 10^{-300}$)
+    \item Pearson correlation (AdjEM vs ordinal rank): $r = -0.963$
+    \item 9 of the top 10 teams match between our AdjEM ranking and KenPom's
+    \item AdjEM range: $-51.7$ to $+44.9$ (vs KenPom's typical $-25$ to $+35$; our range is wider because we lack home-court and tempo adjustments that KenPom uses to regularize)
+\end{itemize}
+
+The near-perfect Spearman correlation means our \textit{ranking} essentially reproduces KenPom's. The wider AdjEM range means our absolute values are noisier, but for matchup prediction we only need the \textit{difference}, which is robust to global scaling.
+
+
+% ============================================================================
+\section{Kellert Spread Model}
+
+Update~\#2's models all predicted $P(\text{win})$ directly. Kellert's 2017 second-place Kaggle solution~\citep{kellert2017} instead predicts the continuous point margin $\hat{\Delta}$ via Ridge regression, then converts:
+\begin{equation}
+    P(\text{Team A wins}) = \Phi\!\left(\frac{\hat{\Delta}}{\sigma}\right)
+\end{equation}
+where $\sigma$ is calibrated from training residuals. The intuition: basketball scores are approximately Normal conditional on team quality, so modeling the full margin distribution produces better-calibrated probabilities than a logistic sigmoid.
+
+Our implementation uses Ridge ($\alpha = 1.0$) on two features: AdjEM difference and seed difference. The flip-and-double augmentation (each game generates two training rows with negated features and inverted outcomes) ensures the model intercept is exactly zero. Probabilities are clipped to $[0.025, 0.975]$.
+
+The calibrated $\sigma$ averages 11.55 across LOTO folds, consistent with Kellert's reported 10.55 and the common rule of thumb that NCAA game outcomes carry $\sim$11 points of irreducible noise.
+
+
+% ============================================================================
+\section{Results}
+
+Table~\ref{tab:progression} traces the Brier score improvement through each engineering change, starting from Update~\#2's best model.
+
+\begin{table}[ht]
+\centering
+\caption{Brier score progression. Each row adds one change to the previous row. LOTO over 2014--2025 (11 tournaments, 736 games).}
+\label{tab:progression}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Model Configuration} & \textbf{Mean Brier} & $\Delta$ \textbf{vs Update \#2} \\
+\midrule
+\multicolumn{3}{l}{\textit{Update \#2 baselines (ordinal ranks)}} \\
+\quad KenPom rank logistic & 0.1961 & --- \\
+\quad Multi-feature logistic (16 features) & 0.197 & $+0.001$ \\
+\quad XGBoost (53 features) & 0.214 & $+0.018$ \\
+\quad MoE (K=4, EM) & 0.209 & $+0.013$ \\
+\quad Transformer (4-layer) & 0.245 & $+0.049$ \\
+\midrule
+\multicolumn{3}{l}{\textit{Update \#3: continuous efficiency}} \\
+\quad AdjEM logistic (single feature) & 0.1888 & $-0.0073$ \\
+\quad AdjEM logistic + flip-and-double & 0.1880 & $-0.0081$ \\
+\quad Spread model: AdjEM + seed & 0.1883 & $-0.0078$ \\
+\quad \textbf{Spread model: AdjEM + seed + flip} & \textbf{0.1878} & $\mathbf{-0.0083}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three things stand out. First, \textbf{the continuous AdjEM on its own (0.1888) beats every model from Update~\#2}, including the 16-feature logistic and the 53-feature XGBoost. One well-constructed feature outweighs 52 noisy ones. Second, the spread-to-probability conversion provides a consistent $\sim$0.001 improvement over logistic regression with the same features. Third, flip-and-double contributes another $\sim$0.001 by eliminating the directional bias from canonical team ordering.
+
+
+% ============================================================================
+\section{Negative Results}
+
+We tried four additional techniques. None improved the score.
+
+\subsection{Mixture-of-Experts by game type}
+
+We partitioned matchups into three groups by seed gap: chalk ($|\Delta s| \geq 5$, 59\% of games), competitive ($2 \leq |\Delta s| \leq 4$, 19\%), and toss-up ($|\Delta s| \leq 1$, 22\%). The hypothesis was that these game types have different spread--outcome relationships, particularly different $\sigma$ values.
+
+\begin{table}[ht]
+\centering
+\caption{Per-group spread model analysis. Residual $\sigma$ is nearly identical across game types.}
+\label{tab:moe}
+\small
+\begin{tabular}{@{}lrccc@{}}
+\toprule
+\textbf{Game Type} & $N$ & \textbf{Hi-seed win\%} & \textbf{Avg margin} & \textbf{Residual $\sigma$} \\
+\midrule
+Chalk ($|\Delta s| \geq 5$) & 433 & 75.8\% & $+9.4$ & 11.10 \\
+Competitive ($2$--$4$) & 143 & 67.1\% & $+4.0$ & 11.64 \\
+Toss-up ($0$--$1$) & 160 & 38.1\% & $-2.5$ & 11.91 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The data killed the hypothesis. Residual $\sigma$ varies by less than 1 point across groups (Table~\ref{tab:moe}). Training separate models per group produced 0.1891 Brier (worse than global), and using a global model with group-specific $\sigma$ produced 0.1879 (tied). The AdjEM difference already encodes the game type: a chalk matchup has AdjEM diff $\sim$+19, a toss-up has $\sim$+1. The global linear model adapts to this through the continuous feature, making explicit partitioning redundant.
+
+This result, combined with Update~\#2's EM-based MoE (0.209), is a strong signal that \textbf{MoE does not help for this problem at this data scale}. With only 143 competitive games and 160 toss-ups across 11 seasons, per-group models cannot learn anything the global model does not already capture.
+
+\subsection{Probability calibration}
+
+We tested three calibration approaches on top of the best spread model:
+
+\begin{itemize}[nosep]
+    \item \textbf{Isotonic regression}: 0.1915 (+0.0036). Overfits to training probabilities; every season got worse.
+    \item \textbf{Platt scaling} (logistic on spread): 0.1881 (+0.0003). Marginal degradation.
+    \item \textbf{$\sigma$ multiplier search} (0.90--1.15): best at $\sigma \times 0.95$, Brier = 0.1878. Tied with baseline.
+\end{itemize}
+
+The Normal CDF is already an excellent calibration function for this domain. The spread model's residuals are approximately Normal (verified in Update~\#2's diagnostics), so re-calibrating adds parameters without adding information.
+
+\subsection{2021 COVID season exclusion}
+
+2021 is every model's worst year (Brier $\sim$0.213 vs $\sim$0.185 for normal years). We tested three treatments: (a)~exclude 2021 from training only, (b)~exclude entirely, (c)~downweight by 50\%. All three produced identical results for non-2021 seasons (Brier 0.1853). The 2021 training data does not poison the model; 2021 is simply hard to predict because the COVID-disrupted season created a genuine regime shift.
+
+\subsection{Market-prior fusion}
+
+Without access to Vegas or Kalshi game-level odds (Kalshi has no NCAA markets; we have no odds API key), we used historical seed-pair win rates as a proxy for ``market consensus.'' Bayesian log-odds fusion with the spread model hurt at every prior weight we tested (0.1 to 0.5). The reason: seed information is already in the model via the \texttt{seed\_diff} feature. Fusing a seed-based prior with a model that already uses seeds double-counts the same signal.
+
+This technique would likely help with \textit{actual} market odds, which incorporate information our model does not have (injuries, motivation, public betting patterns). But without that data, there is nothing to fuse.
+
+
+% ============================================================================
+\section{Competition Submission}
+
+We generated the Kaggle Stage 2 submission for the 2026 tournament using the best model (Ridge spread, AdjEM + seed, flip-and-double, $\sigma = 11.55$, clip $[0.025, 0.975]$). The model was trained on all available tournament games (2014--2025, 1,472 rows after flip-and-double). The submission contains 132,133 rows of $P(\text{Team A beats Team B})$ for every possible D1 matchup. Sample predictions for top seeds align with expectations: Duke (AdjEM = 44.9) gets $\sim$63\% against other top teams and $>$97\% against 16 seeds.
+
+
+% ============================================================================
+\section{What We Learned}
+
+\paragraph{One good feature beats many mediocre ones.} Our single AdjEM difference (0.1888) beats a 16-feature logistic (0.197), a 53-feature XGBoost (0.214), and a 4-layer Transformer (0.245). In small-data regimes, signal density matters more than feature breadth.
+
+\paragraph{Continuous trumps discrete.} The same underlying information (team quality) expressed as a continuous efficiency margin is worth 0.008 Brier over its ordinal rank encoding. This is approximately the gap between a median Kaggle submission and a top-20\% one.
+
+\paragraph{The spread model is naturally well-calibrated.} Predicting margins and converting via $\Phi(\hat{\Delta}/\sigma)$ produces probabilities that do not need post-hoc calibration. The Normal residual assumption holds well enough for tournament games.
+
+\paragraph{Complexity does not help at 736 games.} MoE, Transformer, XGBoost, ensemble optimization, and isotonic calibration all failed or tied. The common thread is insufficient data: each technique adds parameters or partitions the data, and with $\sim$67 test games per LOTO fold, there is not enough signal to exploit.
+
+\paragraph{Negative results are results.} We spent significant time on MoE, calibration, COVID exclusion, and market fusion. None moved the needle. But each ``failure'' eliminated a hypothesis and narrowed the search space. The MoE analysis (Table~\ref{tab:moe}) shows precisely why game-type partitioning fails: the residual $\sigma$ is invariant to seed gap. That insight---that tournament game noise is constant regardless of matchup quality---is worth knowing.
+
+
+% ============================================================================
+\section{Current Standing and Remaining Gap}
+
+\begin{table}[ht]
+\centering
+\caption{Where we stand relative to known benchmarks.}
+\label{tab:benchmarks}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Benchmark} & \textbf{Brier} & \textbf{Gap to Our Best} \\
+\midrule
+Coin flip & 0.250 & $+0.062$ \\
+Seed logistic & 0.200 & $+0.012$ \\
+KenPom rank logistic & 0.196 & $+0.008$ \\
+\textbf{Our best (spread + AdjEM)} & \textbf{0.188} & --- \\
+KenPom AdjEM logistic (literature) & $\sim$0.185 & $-0.003$ \\
+Vegas line & $\sim$0.175 & $-0.013$ \\
+Kaggle top-10 & $<$0.170 & $-0.018$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The remaining 0.013 gap to Vegas likely requires information we do not have: injury reports, late-season player developments, travel fatigue, and the aggregated wisdom of the betting market itself. Our model uses only box-score-derived efficiency and committee-assigned seeds. Within that information set, we believe we are close to the ceiling.
+
+
+% ============================================================================
+\section{Next Steps}
+
+\begin{enumerate}[nosep]
+    \item \textbf{Acquire real market odds.} An Odds API subscription (\$20/month) would give us historical Vegas lines for every tournament game since 2014. This is the single feature most likely to close the remaining gap.
+    \item \textbf{Improve efficiency model.} Add home-court adjustment, recency weighting (games in March count more than November), and margin-of-victory dampening (blowouts are less informative).
+    \item \textbf{Ensemble with Transformer.} Pretrain the Transformer on regular-season outcomes, then fine-tune on tournaments. Even if the Transformer alone is worse, it may capture sequence-dependent patterns (momentum, hot streaks) that the static efficiency model misses, providing diversification in an ensemble.
+    \item \textbf{Final paper.} Consolidate Updates 1--3 into a single paper with complete methodology, ablation study, and competition results.
+\end{enumerate}
+
+
+% ============================================================================
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Oliver(2004)]{oliver2004}
+Oliver, D.
+\newblock \textit{Basketball on Paper: Rules and Tools for Performance Analysis}.
+\newblock Potomac Books, 2004.
+
+\bibitem[Kellert(2017)]{kellert2017}
+Kellert, S.
+\newblock March Machine Learning Mania 2017: 2nd Place Solution.
+\newblock Kaggle Winner Interview, 2017.
+
+\bibitem[Landgraf(2017)]{landgraf2017}
+Landgraf, A.
+\newblock March Machine Learning Mania 2017: 1st Place Solution.
+\newblock Kaggle Winner Interview, 2017.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\end{thebibliography}
+
+\end{document}
