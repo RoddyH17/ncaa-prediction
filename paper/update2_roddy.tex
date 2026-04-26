@@ -1,0 +1,300 @@
+\documentclass[11pt,a4paper]{article}
+
+% -- Packages ----------------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% -- Colors ------------------------------------------------------------------
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% -- Header / Footer ---------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#2}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% -- Section styling ----------------------------------------------------------
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% -- Title --------------------------------------------------------------------
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#2: Feature Engineering \& Baseline Models}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{March 28, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+% ============================================================================
+\section{Overview}
+
+This update covers two phases of work that build on the data pipeline established in Update~\#1. Phase~1 addresses the feature engineering gaps identified in our EDA: we add Dean Oliver's Four Factors from the box score data, replace the crude rolling momentum with a schedule-adjusted variant, implement flip-and-double data augmentation, and apply probability clipping. Phase~2 implements the Kellert spread-to-probability model~\citep{kellert2017}, which predicts continuous point margins rather than binary outcomes and converts to probabilities via the Normal CDF. Together, these changes reduce our best Brier score from 0.1961 (KenPom logistic) to 0.1907 (spread model with enhanced features), a 2.7\% improvement.
+
+
+% ============================================================================
+\section{Phase 1: Feature Engineering}
+
+\subsection{Dean Oliver's Four Factors}
+
+Update~\#1 relied entirely on ordinal rankings and seed numbers. We noted that the Kaggle dataset includes 124,529 detailed regular-season box scores (2003--2026) with field goal attempts, three-pointers, free throws, rebounds, turnovers, and more---none of which we were using. Dean Oliver's Four Factors~\citep{oliver2004} distill box score statistics into four per-possession metrics that capture the fundamental axes of basketball performance:
+
+\begin{align}
+    \text{eFG\%} &= \frac{\text{FGM} + 0.5 \cdot \text{FGM3}}{\text{FGA}} \label{eq:efg} \\[4pt]
+    \text{TO rate} &= \frac{\text{TO}}{\text{Poss}} \label{eq:to} \\[4pt]
+    \text{OR rate} &= \frac{\text{OR}}{\text{OR} + \text{Opp\_DR}} \label{eq:or} \\[4pt]
+    \text{FT rate} &= \frac{\text{FTM}}{\text{FGA}} \label{eq:ft}
+\end{align}
+
+\noindent where possessions are estimated as $\text{Poss} \approx \text{FGA} - \text{OR} + \text{TO} + 0.44 \cdot \text{FTA}$. We compute season averages per team, then take pairwise differences at the matchup level. Table~\ref{tab:four-factors} shows the 2025 season distribution.
+
+\begin{table}[h]
+\centering
+\caption{Four Factors summary statistics, 2025 season (364 D1 teams).}
+\label{tab:four-factors}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{Metric} & \textbf{Mean} & \textbf{Std} & \textbf{Min} & \textbf{Max} \\
+\midrule
+eFG\% & 0.500 & 0.030 & 0.410 & 0.580 \\
+TO rate & 0.182 & 0.022 & 0.130 & 0.250 \\
+OR rate & 0.283 & 0.038 & 0.170 & 0.390 \\
+FT rate & 0.252 & 0.036 & 0.160 & 0.370 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The correlation of the Four Factor differentials with tournament outcomes ranges from $|r| = 0.06$ (FT rate) to $|r| = 0.19$ (OR rate). These are weaker than seed difference ($|r| = 0.46$) or KenPom rank difference ($|r| = 0.44$), which is expected: a single-season average of offensive rebounding rate is a noisy signal compared to a composite rating that integrates thousands of data points. However, these features are \textit{orthogonal} to the ranking systems---the correlation between \texttt{efg\_pct\_diff} and \texttt{rank\_diff\_POM} is only 0.35---so they add independent information. Combining POM with Four Factors in a logistic regression reduces Brier from 0.1960 to 0.1951 (Table~\ref{tab:results}).
+
+
+\subsection{Schedule-Adjusted Momentum}
+
+Update~\#1's momentum features (10-game rolling win\% and margin) correlated weakly with outcomes ($r = 0.04$ and $r = 0.11$). We identified the problem: raw rolling averages ignore opponent quality. A team closing the season 10--0 against weak opponents looks identical to one going 10--0 against ranked teams.
+
+Our fix weights each game's margin by opponent strength:
+\begin{equation}
+    \text{Adj.~Margin} = \frac{1}{N} \sum_{i=1}^{N} m_i \cdot \frac{200 - r_i^{\text{POM}}}{200}
+    \label{eq:adj-momentum}
+\end{equation}
+where $m_i$ is the point margin and $r_i^{\text{POM}}$ is the opponent's KenPom ordinal rank. Beating a top-10 team counts $\sim$19$\times$ more than beating a team ranked 200th. We also add \texttt{sos\_last10} (mean opponent rank over the last 10 games) as a separate feature.
+
+The schedule-adjusted margin difference achieves $r = 0.41$ with tournament outcome---almost as high as KenPom rank difference itself. This is the single largest feature-level improvement in this update. When added to the logistic model, Brier drops from 0.1951 to 0.1931.
+
+
+\subsection{Flip-and-Double}
+
+Our training data uses a canonical ordering convention: the team with the lower ID is always ``Team~A.'' This introduces a subtle directional bias---the model can overfit to the arbitrary assignment of which team is A vs B. We eliminate this by generating a mirrored copy of every matchup: all difference features are negated, A/B features are swapped, and the label is flipped. This doubles the training set from 736 to 1,472 rows and produces an exact 50/50 label balance.
+
+\begin{table}[h]
+\centering
+\caption{Effect of flip-and-double on model performance.}
+\label{tab:flip}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Model} & \textbf{Without Flip} & \textbf{With Flip} \\
+\midrule
+Pruned LR + momentum + clip & 0.1931 & 0.1919 \\
+Spread: pruned + momentum & 0.1917 & 0.1907 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The improvement is small (0.001--0.001) but consistent across all models. More importantly, it is methodologically correct: without flipping, the model's intercept can absorb the slight imbalance in the canonical ordering (Team~A wins 51.2\% of the time), producing biased probability estimates.
+
+
+\subsection{Probability Clipping}
+
+We clip all predicted probabilities to $[0.025, 0.975]$. The motivation comes from the nature of March Madness: no game is ever truly certain. The 2018 UMBC--Virginia upset (16 seed over overall 1 seed) is a reminder that tail events are structural, not anomalous. Under Brier scoring, a confident wrong prediction ($p = 0.99$ when the outcome is 0) contributes $(0.99)^2 = 0.98$ to the loss---nearly the maximum possible penalty for a single game.
+
+In practice, clipping has minimal effect on logistic regression (whose sigmoid outputs are already bounded away from 0 and 1) but provides a safety net for tree-based and spread models that can produce more extreme probabilities. The measured improvement is $< 0.001$ Brier, but we retain it as a robustness measure.
+
+
+\subsection{Feature Pruning}
+
+Update~\#1 used 39 features, many redundant (9 rating systems $\times$ 3 variants each). We prune to 8 features for linear models:
+
+\begin{itemize}[nosep]
+    \item \texttt{seed\_diff} --- committee's team quality assessment
+    \item \texttt{rank\_diff\_POM} --- KenPom algorithmic ranking
+    \item \texttt{efg\_pct\_diff}, \texttt{to\_rate\_diff}, \texttt{or\_rate\_diff}, \texttt{ft\_rate\_diff} --- Four Factors
+    \item \texttt{momentum\_adj\_margin\_diff} --- schedule-weighted recent performance
+    \item \texttt{sos\_last10\_diff} --- recent schedule strength
+\end{itemize}
+
+This set balances coverage (seeds, ratings, box scores, momentum) with low collinearity. The pairwise correlation between \texttt{seed\_diff} and \texttt{rank\_diff\_POM} is 0.89, but each remaining feature adds a distinct signal.
+
+
+% ============================================================================
+\section{Phase 2: Spread-to-Probability Model}
+
+\subsection{Motivation}
+
+Logistic regression directly models $P(\text{Team A wins} \mid X)$. An alternative, proposed by Kellert in his 2nd-place 2017 solution~\citep{kellert2017}, is to first predict the continuous point margin $\Delta$, then convert:
+\begin{equation}
+    P(\text{Team A wins}) = \Phi\!\left(\frac{\hat{\Delta}}{\sigma}\right)
+    \label{eq:spread}
+\end{equation}
+where $\Phi$ is the standard Normal CDF and $\sigma$ is the residual standard deviation of the spread model, calibrated from training data.
+
+The intuition is that basketball scores are approximately Normal conditional on team quality. By modeling the full distribution of the margin rather than just the sign, the spread model produces better-calibrated probabilities---especially for close matchups, where the probability should be near 50\%, and for lopsided ones, where it should be near 0 or 1.
+
+\subsection{Implementation}
+
+We use Ridge regression ($\alpha = 1.0$) to predict $\Delta$ from the same 8 pruned features. For each LOTO fold:
+\begin{enumerate}[nosep]
+    \item Fit Ridge on training data: $\hat{\Delta} = X\beta$
+    \item Compute training residuals: $\sigma = \text{std}(\Delta_{\text{train}} - \hat{\Delta}_{\text{train}})$
+    \item Predict test margins and convert: $p = \Phi(\hat{\Delta}_{\text{test}} / \sigma)$
+    \item Clip to $[0.025, 0.975]$
+\end{enumerate}
+
+The calibrated $\sigma$ averages 11.5 points across folds, consistent with Kellert's reported value of 10.55 and the common sports analytics rule of thumb that college basketball game outcomes have $\sim$11 points of irreducible noise. The spread model achieves $R^2 = 0.39$ on out-of-sample margins (Figure~\ref{fig:spread-diag}).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{../output/p2_01_spread_diagnostics.png}
+\caption{Left: predicted vs.\ actual point spread (LOTO pooled). Right: residual distribution with fitted Normal overlay ($\sigma = 11.7$). The approximately Normal residuals validate the CDF conversion.}
+\label{fig:spread-diag}
+\end{figure}
+
+
+% ============================================================================
+\section{Results}
+
+Table~\ref{tab:results} presents LOTO Brier scores for all models. Each row adds one component to trace the contribution of each improvement.
+
+\begin{table}[h]
+\centering
+\caption{Model comparison --- leave-one-tournament-out Brier score, 2014--2025 (11 tournaments, 736 games). Lower is better. Standard deviation across tournament years in parentheses.}
+\label{tab:results}
+\small
+\begin{tabular}{@{}llcc@{}}
+\toprule
+& \textbf{Model} & \textbf{Mean Brier} & \textbf{$\Delta$ vs Baseline} \\
+\midrule
+\multicolumn{4}{l}{\textit{Old baselines (Update \#1)}} \\
+& Seed logistic & 0.1994 (0.021) & --- \\
+& KenPom logistic & 0.1961 (0.017) & $-0.0033$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 1: Feature engineering}} \\
+& + Probability clipping & 0.1960 (0.017) & $-0.0001$ \\
+& + Four Factors & 0.1951 (0.019) & $-0.0010$ \\
+& + Adjusted momentum & 0.1931 (0.022) & $-0.0030$ \\
+& + Flip-and-double & 0.1919 (0.022) & $-0.0042$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 2: Spread model}} \\
+& Spread: POM + seed only & 0.1948 (0.018) & $-0.0013$ \\
+& Spread: pruned 6 features & 0.1938 (0.019) & $-0.0023$ \\
+& Spread: pruned + momentum & 0.1917 (0.021) & $-0.0044$ \\
+& \textbf{Spread: pruned + flip} & \textbf{0.1907} (0.021) & $\mathbf{-0.0054}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{../output/p2_03_brier_by_season.png}
+\caption{Brier score by tournament year for key models. 2021 is the hardest year for all models (COVID-disrupted season). 2019 and 2025 are the easiest.}
+\label{fig:brier-season}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\textwidth]{../output/p2_04_calibration.png}
+\caption{Calibration plot. The spread model (green) tracks the diagonal more closely than the old KenPom logistic (orange), particularly in the 0.3--0.7 range where most tournament games fall.}
+\label{fig:calibration}
+\end{figure}
+
+
+% ============================================================================
+\section{Discussion}
+
+\paragraph{What worked.} The two largest improvements came from (a)~schedule-adjusted momentum ($-0.0020$ Brier over Four Factors alone) and (b)~the spread-to-probability conversion ($-0.0012$ over logistic with the same features). The momentum result is noteworthy: raw 10-game rolling averages were essentially noise ($r = 0.04$), but weighting by opponent strength produced a feature with $r = 0.41$---nearly as predictive as KenPom rankings. This suggests that ``form'' is a real signal, but only when properly adjusted for schedule.
+
+The spread model's advantage aligns with Kellert's 2017 observation: modeling the full margin distribution produces better-calibrated mid-range probabilities. Logistic regression can only learn the sign of the margin; the spread model learns its magnitude, which gives it richer information for probability estimation.
+
+\paragraph{What didn't work as much.} Probability clipping contributed $< 0.001$ Brier. This is unsurprising: logistic regression and the Normal CDF both naturally produce bounded probabilities. Clipping would matter more for tree-based models or in competitions scored by log loss, where extreme predictions are penalized far more severely.
+
+\paragraph{Gap to Vegas.} Our best Brier of 0.1907 is still 0.016 above the estimated Vegas line benchmark of $\sim$0.175. We believe this gap is primarily due to two missing information sources:
+\begin{enumerate}[nosep]
+    \item \textbf{Continuous efficiency values.} We use ordinal KenPom \textit{ranks} from the Massey file, not the actual KenPom adjusted efficiency margin (AdjEM). The rank-to-rank difference between teams ranked 1 and 5 may be far larger in efficiency units than between teams ranked 50 and 54, but our model sees both as a gap of 4. Acquiring AdjEM values (from KenPom subscription or Barttorvik's free alternative) should directly improve the spread model.
+    \item \textbf{Market-implied probabilities.} Vegas lines are the single strongest publicly available predictor of NCAA outcomes~\citep{pomeroy2004}. Our Layer~4 (market features from Kalshi) is planned for Weeks~5--6.
+\end{enumerate}
+
+\paragraph{The 2021 anomaly.} Every model performs worst on the 2021 tournament, which took place entirely in Indianapolis (no home-court or travel effects) during a COVID-disrupted season with widely varying numbers of games played. This is a genuine regime shift that any model trained on normal seasons will struggle with.
+
+
+% ============================================================================
+\section{Next Steps}
+
+\begin{enumerate}[nosep]
+    \item \textbf{Continuous efficiency values.} Scrape Barttorvik (free) for AdjOE, AdjDE, and Barthag. Replace ordinal rank features with continuous efficiency differentials.
+    \item \textbf{Mixture-of-Experts.} Partition matchups by seed gap into chalk ($\Delta s \geq 5$), competitive ($2 \leq \Delta s \leq 4$), and toss-up ($\Delta s \leq 1$) games. Train a separate spread model per group. The hypothesis is that the spread--outcome relationship has different $\sigma$ values in each regime.
+    \item \textbf{Transformer sequence model (experimental).} Encode each team's season as a sequence of game embeddings, produce a [CLS] team vector, and predict matchup margins. We are realistic that 736 games may be insufficient, but the architecture is worth testing with heavy regularization.
+    \item \textbf{Kalshi market integration.} Pull market-implied probabilities and compute a ``disagreement signal'' feature.
+\end{enumerate}
+
+
+% ============================================================================
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Oliver(2004)]{oliver2004}
+Oliver, D.
+\newblock \textit{Basketball on Paper: Rules and Tools for Performance Analysis}.
+\newblock Potomac Books, 2004.
+
+\bibitem[Kellert(2017)]{kellert2017}
+Kellert, S.
+\newblock March Machine Learning Mania 2017: 2nd Place Solution.
+\newblock Kaggle Winner Interview, 2017.
+
+\bibitem[Landgraf(2017)]{landgraf2017}
+Landgraf, A.
+\newblock March Machine Learning Mania 2017: 1st Place Solution --- Meta-Prediction Strategy.
+\newblock Kaggle Winner Interview, 2017.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Sokol et~al.(2006)]{sokol2006}
+Sokol, J., Jank, W., and Harp, S.
+\newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
+\newblock Georgia Institute of Technology, 2006--2026.
+
+\end{thebibliography}
+
+\end{document}

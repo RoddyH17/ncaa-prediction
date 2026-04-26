@@ -1,0 +1,251 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#3}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#3: Closing the Gap to the Kaggle Top}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{April 26, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Overview}
+
+The 2026 Kaggle leaderboard locked in mid-April. The top three submissions scored 0.1097, 0.1149, and 0.1160 in combined Brier across the 126 actual men's and women's tournament games. Our Multi-Feature Logistic from Update~\#2 sat at 0.1264 on the same 126 games. That is a 0.010 to 0.016 gap, depending on whose result we take as the target. This update is about what we did to close it without using the things the top finishers used (manual injury data, betting markets, prediction markets).
+
+We finished at 0.1229 combined Brier with a model that uses only 8 features and a single LR plus XGBoost blend. The improvement over our starting 0.1264 is 0.0035, which is small in absolute terms but represents about 30\% of the gap to 3rd place. The other 70\% of the gap, by our reading of the top writeups, is information we did not have. We came back to that question at the end.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{What the top finishers actually did}
+
+Reading the published writeups for 1st, 2nd, and 3rd place was the most productive hour of this project. We had been over-engineering models. They were over-engineering features, in different directions.
+
+\textbf{1st place (0.1097).} Manual injury adjustments for 16 specific players using rotowire status flags and EvanMiya BPR data. Their model is a 3-feature XGBoost regression on seed difference, a hand-tuned team rating, and quality wins differential. They also did one Brier-aware post-processing trick: round any prediction above 0.97 to 0.999 and below 0.03 to 0.001. They sharpened 28 first-round games this way. The author writes that they got lucky none of those 28 produced an upset. We tested the same trick on our predictions and it did almost nothing because our model is more regularized and rarely outputs probabilities that extreme.
+
+\textbf{2nd place (0.1149).} A 60/40 XGBoost/LR blend on 35 features as differentials. The interesting move is that they trained men's and women's together as a single 1{,}445-row dataset, citing that "relative-strength dynamics are gender-agnostic." They use Massey ordinals filtered to the last two weeks of the regular season (mean, median, min across all 28+ ranking systems), a margin-of-victory Elo with 75\% inter-season carry-over, and prediction clipping at $[0.02, 0.98]$.
+
+\textbf{3rd place (0.1160).} The most aggressive use of external data. Their LR predicted with a triple-market blend: ESPN BPI game-specific predictions, Vegas no-vig moneylines, and Kalshi championship futures. For first-round games specifically, they weighted markets at 90\% for men's and 75\% for women's. The author's CV without markets was 0.124, so the markets contribute about 0.008 of their final improvement. They also did aggressive backward feature elimination, going from 33 features to 23 in one round and reporting it as their largest single-round CV gain ($-0.007$ Brier).
+
+The patterns are clear. None of them won by stacking exotic models. 1st place pays a person to type in injury data, 2nd place pools more training rows and uses last-2-week consensus rankings, 3rd place buys signal from markets that aggregate everything we don't see. The architecture lessons we could plausibly steal: aggressive feature pruning, combined men+women training, last-2-week Massey, carry-over Elo with margin-of-victory, and a moderate LR/XGB blend. The data lessons we could not steal: injuries and markets.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Improvements that worked}
+
+Three things cleanly improved both LOSO Brier (cross-validated on 2014--2025) and 2026 actual Brier.
+
+\subsection{Combined men's + women's training}
+
+Pooling the genders into a single 1{,}445-game training set with an \texttt{is\_womens} flag was free. Our LOSO combined Brier moved from 0.164 (training each gender separately) to roughly the same number, but the women's component improved by about 0.001. The 2nd-place author had argued the doubling is the point. We saw a smaller effect than they did, possibly because we had 12 seasons of women's data (back to 2014) where they had more.
+
+For features that only exist on the men's side (Massey ordinals), we set them to zero on the women's rows. The model learns to ignore them through the \texttt{is\_womens} interaction. This is uglier than training two separate models but it does mean we have one canonical pipeline instead of two.
+
+\subsection{Per-seed-pair historical base rate}
+
+We added a single feature \texttt{seed\_pair\_winrate} computed from 1985--2025 tournament games. For a matchup (seed $a$, seed $b$), this is the empirical $P(\text{lower seed wins})$ over all NCAA tournament games where that pairing occurred, with Beta(2,2) smoothing for rare pairs. So 1v16 maps to 0.988, 5v12 to 0.644, 8v9 to 0.481.
+
+This is not the same as just regressing on seed difference. A 1-seed playing an 8-seed (after both win their first round) is very different from a 1-seed playing a 16-seed even though one is a 7-seed-difference and the other is 15. The base rate captures both raw seed difference and round-conditional dynamics that LR cannot recover from $\Delta s$ alone.
+
+LOSO improvement was about 0.0001 (noise), but on 2026 actual it pulled the men's Brier from 0.1536 to 0.1518, a 0.0018 reduction. Almost all of the gain landed on men's, which makes sense: women's tournaments are chalkier and the linear seed slope already covers the variance.
+
+\subsection{Aggressive feature pruning via L1}
+
+We started with 27 features (Barttorvik, Four Factors, ratings, Massey composite, harry rating, momentum, seed pair, \texttt{is\_womens}). Running L1 logistic regression at $C = 0.1$ on the combined dataset selected 11 features automatically. Using L2 logistic on those 11 features cut the LOSO Brier to 0.1614 (from 0.1638) and the 2026 Brier to 0.1243 (from 0.1262).
+
+Looking at correlations, the picture is a near-comedy of redundancy. The strength ratings \texttt{bart\_net}, \texttt{srs}, \texttt{elo}, \texttt{harry}, and \texttt{seed\_pair\_winrate} are all correlated above 0.78 with each other. They are five different ways of measuring "how good is this team relative to its opponent." The two Massey aggregates \texttt{massey\_mean} and \texttt{massey\_min} are correlated at 0.96. The Four Factors and the raw efficiency components are partially captured by Barttorvik adjusted efficiency. So when L1 dropped 16 of the 27 features, it was throwing out duplicates rather than information.
+
+We pushed the pruning one more step manually, going from 11 to 8 by removing \texttt{bart\_adjde\_diff} (anticorrelated $-0.89$ with \texttt{bart\_net\_diff}, so it adds nothing on top of the net), \texttt{ft\_rate\_diff} (low signal in our LR), and \texttt{massey\_min\_diff} (96\% correlated with \texttt{massey\_mean\_diff}). LOSO went to 0.1612. 2026 went to 0.1238.
+
+\subsection{LR + XGB 70/30 blend}
+
+The last clean improvement was adding 30\% XGBoost to the 70\% LR prediction. We used the 2nd-place hyperparameters (\texttt{max\_depth}=3, \texttt{n\_estimators}=300, \texttt{learning\_rate}=0.05, default sub/colsample 0.8) and \texttt{random\_state}=42. The blend trains the LR on standardized features and the XGB on raw features, which 2nd place explained well: LR's coefficient learning is sensitive to feature scale, while tree splits are not.
+
+LOSO went from 0.1612 to 0.1606. 2026 went from 0.1238 to 0.1229. Both moved in the right direction, by similar amounts. Notably, with our 8 features the optimal LR weight is 70\% versus 2nd place's 40\%; their feature set is bigger so XGB has more to do, while we already pruned away most of what LR would have struggled with.
+
+The full trajectory looks like Table~\ref{tab:trajectory}.
+
+\begin{table}[h]
+\centering
+\caption{Step-by-step improvement from Update~\#2 baseline to final submission.}
+\label{tab:trajectory}
+\small
+\begin{tabular}{@{}lcrr@{}}
+\toprule
+Configuration & \# features & LOSO Brier & 2026 Brier \\
+\midrule
+Multi-Feature Logistic (Update~\#2) & 20 & 0.1893 & 0.1264 \\
++ Combined M+W training & 27 & 0.1638 & 0.1262 \\
++ \texttt{seed\_pair\_winrate} & 27 & 0.1637 & 0.1255 \\
++ L1 feature selection & 11 & 0.1614 & 0.1243 \\
++ Manual prune of correlated ratings & 8 & 0.1612 & 0.1238 \\
++ LR/XGB 70/30 blend (final) & 8 & \textbf{0.1606} & \textbf{0.1229} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Things that improved LOSO but hurt 2026}
+
+After we got to 0.1229, we kept trying. Several of the experiments in the standard machine-learning playbook turned out worse, in a way that we think is worth documenting.
+
+\subsection{Per-gender blend weights with grid search}
+
+Letting the men's and women's blend ratios float independently and grid-searching over $21 \times 21 \times 12 = 5{,}292$ combinations of \{LR weight\} $\times$ \{XGB weight\} $\times$ \{XGB hyperparameters\} gave us a "best" config of $(w_m, w_w) = (0.75, 0.75)$ with depth 3, 1{,}000 trees, learning rate 0.02. LOSO improved by 0.0003. The 2026 Brier got worse by 0.0015.
+
+\subsection{Bayesian optimization with Gaussian Processes}
+
+We ran Optuna's GP sampler for 50 trials over a 9-dimensional hyperparameter space (LR $C$, four XGB hyperparameters, blend weight). Best config landed at $C=0.24$, depth 4, 850 trees, learning rate 0.054, blend weight 0.78. LOSO improved by 0.0013. 2026 got worse by 0.0034.
+
+\subsection{Multi-seed XGB averaging}
+
+Averaging XGB predictions over 10 random seeds is the textbook way to reduce variance. LOSO went from 0.1606 to 0.1604 (noise). 2026 went from 0.1229 to 0.1237. The single-seed prediction happened to land closer to the actual outcomes than any aggregated prediction across seeds.
+
+\subsection{LightGBM as a third base learner}
+
+A 3-way blend of LR, XGB, and LightGBM searched over weights gave LOSO 0.1601 (best of all attempts) and 2026 0.1243. The "best" weights put 65\% on LR, 0\% on XGB, and 35\% on LightGBM. The mathematical reading is that LightGBM and XGBoost are correlated at 0.989 in OOF predictions, so they are essentially the same model and the blend just picked LightGBM by chance.
+
+\subsection{The pattern}
+
+Pulling these together, Table~\ref{tab:overfit} shows what we mean by "LOSO improvement that does not transfer."
+
+\begin{table}[h]
+\centering
+\caption{Aggressive optimization beyond the 70/30 blend. Negative is improvement.}
+\label{tab:overfit}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Method & $\Delta$ LOSO & $\Delta$ 2026 \\
+\midrule
+70/30 LR+XGB blend (baseline) & 0 & 0 \\
+Per-gender + 5{,}292-point grid search & $-0.0003$ & $+0.0015$ \\
+Optuna GP, 50 trials, 9 dimensions  & $-0.0013$ & $+0.0034$ \\
+Multi-seed XGB averaging & $-0.0002$ & $+0.0008$ \\
+3-way LR/XGB/LGB blend & $-0.0005$ & $+0.0014$ \\
+Stacking (non-negative meta-LR) & $-0.0002$ & $+0.0014$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every single one of these improved LOSO and worsened 2026. The ratio is pretty consistent: every 0.001 of LOSO improvement bought us roughly 0.002--0.003 of 2026 deterioration. This is not subtle. With $\sim$1{,}300 LOSO games and 126 test games, the LOSO Brier estimate has standard error around 0.002, which is the same scale as the "improvements" we were chasing. We were tuning to noise.
+
+We stopped here. The 70/30 single-seed blend is what we are submitting. It is not the LOSO-best model we could find. It is the LOSO-best model that we are confident is also test-best, given how easy it is to overfit a 9-dimensional hyperparameter space to a 1{,}300-game cross-validation estimate.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Final model and submission}
+
+The submission file is \texttt{output/submission\_stage2\_FINAL.csv}, with the standard 132{,}133 rows in canonical (lower TeamID first) order. Predictions are clipped to $[0.005, 0.995]$. Tournament-pair predictions come from the model below; non-tournament pairs default to 0.5.
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Features (8):} \texttt{seed\_pair\_winrate}, \texttt{bart\_net\_diff}, \texttt{harry\_diff}, \texttt{elo\_diff}, \texttt{elo\_slope\_diff}, \texttt{srs\_diff}, \texttt{massey\_mean\_diff} (men's only; women's set to 0), \texttt{tempo\_diff}.
+\item \textbf{Training data:} 1{,}445 tournament games from 2014--2025 (excluding 2020 COVID), pooled men's and women's. The 2026 actual results were not used to train, tune, or select anything.
+\item \textbf{Pipeline:} Median imputation, StandardScaler, then $0.7 \cdot \text{LR}(C=0.1) + 0.3 \cdot \text{XGB}$. The XGB receives raw (unscaled) features, with \texttt{max\_depth}=3, \texttt{n\_estimators}=300, \texttt{learning\_rate}=0.05, and default subsample/colsample at 0.8. \texttt{random\_state}=42 throughout.
+\item \textbf{Calibration:} None. We tried isotonic and sigmoid; neither helped.
+\item \textbf{Selection-Sunday cutoff:} All features use only data from before each year's Selection Sunday. Barttorvik ratings are scraped with the year-specific cutoff date. Massey ordinals are filtered to RankingDayNum $\le 133$. The \texttt{seed\_pair\_winrate} for each LOSO fold uses tournament games from all seasons except the held-out one.
+\end{itemize}
+
+The final scores are in Table~\ref{tab:final}.
+
+\begin{table}[h]
+\centering
+\caption{Final 2026 Brier scores against Kaggle benchmarks.}
+\label{tab:final}
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Submission & Brier (126 games) & Method \\
+\midrule
+Kaggle 1st place & 0.1097 & + manual injury data, hand-tuned rating, sharpening \\
+Kaggle 2nd place & 0.1149 & + 35 features, LR/XGB 40/60, last-2-week Massey \\
+Kaggle 3rd place & 0.1160 & + ESPN BPI / Vegas / Kalshi market blend \\
+Our submission   & \textbf{0.1229} & 8 features, LR/XGB 70/30, sports data only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We are 0.0069 behind 3rd place. Looking at where that gap could come from: 3rd place's CV without markets was 0.124, very close to our LOSO. Their improvement to 0.116 is essentially the markets contribution. 1st place's CV was 0.159, which is where we were before pruning, and their drop to 0.110 comes from injury data plus the Brier-sharpening gamble paying off in a chalky year. Neither is a methodological gap so much as an information gap.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{What we are taking to the final paper}
+
+There are two findings that deserve more attention than a single update can give them, and we plan to make both into sections of the final paper.
+
+The first is the empirical "ceiling" we keep hitting. Five different team-strength ratings (Barttorvik, Elo, SRS, Massey, harry) all correlate above 0.78 with each other in our pooled OOF predictions. They explain the same underlying variance. After pruning to one or two of them, no model architecture we tried, including XGBoost, LightGBM, RBF kernels, polynomial features, GP-tuned blends, gives more than 0.001 LOSO improvement. The information ceiling for sports-only features looks like it sits somewhere around 0.16 LOSO Brier and 0.12 hold-out Brier. The top Kaggle solutions break through this only by injecting non-statistical information (injuries, markets).
+
+The second is the over-tuning pattern in Table~\ref{tab:overfit}. Six different "improvements" produced negative transfer to 2026, and the size of the negative transfer scaled with the size of the LOSO improvement. We think this is a clean empirical illustration of the well-known optimizer's curse, on a real dataset where we know the true held-out answer. The final paper will document this carefully because we have not seen it laid out this way for sports prediction specifically.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Next}
+
+The remaining work is the final paper itself, due in late April. We need to: tie together the journey from Update~\#1 (data infrastructure) through Update~\#2 (model development and the Barttorvik fix) and now Update~\#3 (closing the gap to Kaggle top); add proper figures for the trajectory and the LOSO-vs-2026 over-tuning plot; and write up the information-ceiling argument as a contribution rather than just an observation. We are aiming for a draft by April 28.
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Barttorvik(2017)]{barttorvik2017}
+Barttorvik.
+\newblock T-Rank: Adjusted efficiency ratings.
+\newblock \url{https://barttorvik.com}, 2017--present.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Brier(1950)]{brier1950}
+Brier, G.W.
+\newblock Verification of forecasts expressed in terms of probability.
+\newblock \emph{Monthly Weather Review}, 78(1):1--3, 1950.
+
+\end{thebibliography}
+
+\end{document}
