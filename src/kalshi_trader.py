@@ -30,17 +30,24 @@ class SyntheticMarketPrices:
     """
 
     def __init__(self, data: dict, noise_std: float = 0.04, flb_strength: float = 0.02,
-                 market_alpha_std: float = 0.03):
+                 market_alpha_std: float = 0.03, exclude_season: int | None = None):
         self.noise_std = noise_std
         self.flb_strength = flb_strength
         self.market_alpha_std = market_alpha_std  # independent info the market has that we don't
+        self.exclude_season = exclude_season
         self.seed_win_rates = self._compute_seed_win_rates(data)
 
     def _compute_seed_win_rates(self, data: dict) -> dict:
-        """Compute historical P(lower seed wins) for each seed matchup."""
+        """Compute historical P(lower seed wins) for each seed matchup.
+
+        If exclude_season is set, that season's tournament data is held out
+        (avoids LOTO leakage when the synthetic market is used as a baseline).
+        """
         from src.pipeline import _parse_seed_num
 
         tourney = data["tourney_compact"]
+        if self.exclude_season is not None:
+            tourney = tourney[tourney["Season"] != self.exclude_season]
         seeds = data["seeds"].copy()
         seeds["SeedNum"] = seeds["Seed"].apply(_parse_seed_num)
 
@@ -242,6 +249,7 @@ class TradingBacktester:
         from src.pipeline import build_tourney_matchups
 
         results = []
+        original_market_gen = self.market_gen
 
         for holdout in seasons:
             bankroll = self.initial_bankroll  # reset each season
@@ -252,6 +260,14 @@ class TradingBacktester:
             if len(X_test) == 0:
                 continue
 
+            # Rebuild synthetic market with holdout season excluded (avoid LOTO leak)
+            market_gen = SyntheticMarketPrices(
+                data, noise_std=original_market_gen.noise_std,
+                flb_strength=original_market_gen.flb_strength,
+                market_alpha_std=original_market_gen.market_alpha_std,
+                exclude_season=holdout,
+            )
+
             # Train model and predict
             model = model_factory()
             model.fit(X_train, y_train)
@@ -259,7 +275,7 @@ class TradingBacktester:
 
             # Generate synthetic market prices (blended with model predictions)
             matchups = build_tourney_matchups(data, holdout)
-            p_market = self.market_gen.generate_for_matchups(
+            p_market = market_gen.generate_for_matchups(
                 matchups, p_model=p_model, seed=holdout
             )
 

@@ -1,0 +1,284 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{natbib}
+\usepackage{array}
+\usepackage{caption}
+
+% ── Colors ────────────────────────────────────────────────────────────────
+\definecolor{cornellred}{HTML}{B31B1B}
+\definecolor{darkblue}{HTML}{1A365D}
+\definecolor{linkblue}{HTML}{2563EB}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=linkblue,
+}
+
+% ── Header / Footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[R]{\small\textcolor{gray}{Project Update \#4}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Section styling ──────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
+
+% ── Title ─────────────────────────────────────────────────────────────────
+\title{%
+    \vspace{-1cm}
+    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
+    {\large Project Update \#4: Ablations, Hybrid Transformer, Calibration \& Brackets}
+}
+\author{
+    Roddy Huang, Yumeng Jin \\
+    Cornell University
+}
+\date{April 14, 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Overview}
+
+After update~\#3 we had a working trading backtest but a bunch of loose ends. The Multi-Feature Logistic was sitting at 0.159 Brier and we hadn't really pulled it apart to understand which features were doing the work. The Transformer was still 0.196, and we had said in update~\#3 that injecting Barttorvik into the game embeddings might help. We hadn't checked whether our probabilities were actually well-calibrated or just lucky on aggregate. And we had bracket-pool predictions but no idea how they'd score in an actual ESPN-style competition.
+
+This update covers four pieces of follow-up work: an ablation study on the Multi-Feature Logistic, a Hybrid Transformer that combines the temporal encoder with static Barttorvik features, a calibration analysis with reliability diagrams and isotonic post-hoc calibration, and a Monte Carlo simulation of bracket-pool performance. The headline finding is that one feature group (Barttorvik) is doing essentially all the work, the Hybrid Transformer closes about half the gap to the logistic baseline, and our probabilities are already well-calibrated enough that isotonic regression makes things worse.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Ablation Study}
+
+We took the Multi-Feature Logistic (21 features, Brier 0.159) and ran two kinds of ablations across the same 11-season LOTO. First, drop-one: remove each feature group, refit, see what happens. Second, only-one: train on a single feature group at a time, see how far it goes alone.
+
+\begin{table}[h]
+\centering
+\caption{Drop-one ablations. Negative $\Delta$ means dropping the group improved Brier.}
+\label{tab:ablation-drop}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Variant & Brier & $\Delta$ vs full \\
+\midrule
+Drop Four Factors & 0.1572 & $-$0.0021 \\
+Drop Efficiency & 0.1589 & $-$0.0004 \\
+Drop Coach & 0.1589 & $-$0.0004 \\
+\textbf{Full set (21 features)} & \textbf{0.1593} & 0.0000 \\
+Drop Momentum & 0.1601 & $+$0.0008 \\
+Drop Seed & 0.1615 & $+$0.0022 \\
+Drop POM & 0.1635 & $+$0.0042 \\
+Drop Barttorvik & 0.1971 & $+$0.0378 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The drop-Barttorvik result is the punchline. Removing those four columns sends Brier from 0.159 to 0.197, a 0.038 jump that wipes out everything we gained over the seed baseline. Every other feature group is essentially noise relative to that. Dropping Four Factors actually \emph{improves} the model by 0.0021, which means those 8 columns are net-negative once Barttorvik is present. Dropping Coach or Efficiency is also slightly beneficial. The model would probably be a hair better with 9 features (Barttorvik + seed + POM + momentum) than with all 21.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\textwidth]{../output/ablation_drop.png}
+\caption{Drop-one ablation results. Green: removing the group helped or was neutral. Red: removing the group hurt. Barttorvik is the only group that meaningfully matters.}
+\label{fig:ablation-drop}
+\end{figure}
+
+The only-one ablations tell the same story from the other side.
+
+\begin{table}[h]
+\centering
+\caption{Only-one ablations: train on a single feature group.}
+\label{tab:ablation-only}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Variant & Brier \\
+\midrule
+Full set (21 features) & 0.1593 \\
+Only Barttorvik (4 features) & 0.1689 \\
+Only POM (1 feature) & 0.1962 \\
+Only Seed (1 feature) & 0.1993 \\
+Only Efficiency (4 features) & 0.2255 \\
+Only Coach (1 feature) & 0.2263 \\
+Only Momentum (2 features) & 0.2468 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Barttorvik alone (four columns: net rating, AdjOE, AdjDE, Barthag) gets 0.169, only 0.010 worse than the full feature set. Everything else, taken alone, is meaningfully worse. The Only-Momentum result is particularly stark: it's barely better than a coin flip (0.250). Late-season form just isn't very predictive of tournament outcomes once you control for team quality, which we already knew but is now quantified.
+
+If we had it all to do over again, the right model would be Barttorvik-only logistic regression, with maybe seed or POM thrown in for that last bit of signal. We don't think we'd be able to go below 0.155 without entirely new data.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Hybrid Transformer}
+
+In update~\#3 we noted that the Transformer at 0.196 couldn't compete with the Barttorvik-based models because its game embeddings only contained box-score and POM-rank information. The natural fix is to give the Transformer access to Barttorvik too, but where to inject it isn't obvious. We tried adding Barttorvik values into the per-game embedding (so each game would carry the opponent's AdjEM as a feature) and quickly ran into a problem: at game time we don't know what an opponent's end-of-season AdjEM will be. Using end-of-season values during the regular season is leakage.
+
+Our solution is to inject Barttorvik as a static side input to the matchup head, not into the sequence. The encoder still produces a CLS embedding from the box-score sequence (capturing trajectory and form), and we concatenate the team's end-of-season Barttorvik vector (5 dims: AdjOE, AdjDE, NetRtg, Barthag, AdjTempo) before feeding everything to the matchup MLP. The Barttorvik values are season-final snapshots, used the same way the logistic model uses them. Pretraining on regular-season games still happens, but only with the box-score sequences—the Barttorvik branch is only active during tournament fine-tuning.
+
+\begin{table}[h]
+\centering
+\caption{Hybrid Transformer LOTO Brier scores by season.}
+\label{tab:hybrid-loto}
+\small
+\begin{tabular}{@{}rrr@{}}
+\toprule
+Season & Vanilla Transformer & Hybrid Transformer \\
+\midrule
+2014 & 0.282 & 0.202 \\
+2015 & 0.238 & 0.156 \\
+2016 & 0.218 & 0.173 \\
+2017 & 0.230 & 0.198 \\
+2018 & 0.232 & 0.197 \\
+2019 & 0.175 & 0.147 \\
+2021 & 0.253 & 0.193 \\
+2022 & 0.278 & 0.204 \\
+2023 & 0.270 & 0.200 \\
+2024 & 0.255 & 0.181 \\
+2025 & 0.186 & 0.137 \\
+\midrule
+Mean & 0.2449 & \textbf{0.1807} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Hybrid Transformer scores 0.181 across 11 seasons, an 0.064 improvement over the vanilla Transformer (0.245). It's still 0.022 worse than the Multi-Feature Logistic (0.159). About half the gap to the logistic baseline disappears when the Transformer gets to see the same continuous features. The remaining half is the cost of having the matchup head also process two 32-dim team embeddings the encoder produced, which apparently are not quite as useful as a few hand-picked numbers from a regression model that knows about strength of schedule.
+
+This is consistent with the broader pattern of the project. Continuous efficiency features dominate everything else, and complex models help only at the margin once those features are present.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Calibration Analysis}
+
+Brier score combines two things: how often the model is right (resolution) and how well the predicted probabilities match observed frequencies (calibration). A model can have low Brier because it's well-calibrated but boring, or because it's miscalibrated but very discriminating. We wanted to know which of these is happening with our models.
+
+We pooled all LOTO predictions (about 730 games per model) and computed the Murphy decomposition $\text{BS} = \text{Reliability} - \text{Resolution} + \text{Uncertainty}$.
+
+\begin{table}[h]
+\centering
+\caption{Brier decomposition. Lower reliability = better calibration. Higher resolution = better discrimination.}
+\label{tab:calibration}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Model & Brier & Reliability & Resolution \\
+\midrule
+Seed Logistic & 0.199 & 0.0023 & 0.053 \\
+KenPom Logistic & 0.196 & 0.0035 & 0.056 \\
+Barttorvik Logistic & 0.169 & 0.0041 & 0.084 \\
+Multi-Feature Logistic & 0.159 & 0.0031 & 0.093 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two things stand out. First, all four models have small reliability terms (under 0.005, where uncertainty is 0.250). The probabilities they produce match observed frequencies pretty well across bins. Second, the entire Brier improvement from Seed (0.199) to Multi-Feature (0.159) is driven by resolution, which goes from 0.053 to 0.093. Better features help the model separate winners from losers. They don't make it dramatically more honest about its own uncertainty.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{../output/reliability_diagram.png}
+\caption{Reliability diagram for the four logistic models, plus the prediction histogram for Multi-Feature Logistic. The diagonal is perfect calibration. All models track the diagonal closely.}
+\label{fig:reliability}
+\end{figure}
+
+We also tested whether isotonic regression as a post-hoc calibration step would help. Split the predictions in half, fit isotonic on one half, evaluate on the other:
+
+\begin{table}[h]
+\centering
+\caption{Isotonic post-hoc calibration on held-out predictions.}
+\label{tab:isotonic}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Model & Uncalibrated & Isotonic & Improvement \\
+\midrule
+Seed Logistic & 0.198 & 0.203 & $-$0.004 \\
+KenPom Logistic & 0.197 & 0.199 & $-$0.002 \\
+Barttorvik Logistic & 0.171 & 0.179 & $-$0.007 \\
+Multi-Feature Logistic & 0.162 & 0.166 & $-$0.004 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Isotonic makes every model worse. The improvements are negative across the board. This is consistent with the Murphy decomposition: there isn't much reliability error to fix, and the isotonic transform just adds noise from overfitting on the calibration set. Logistic regression on standardized features apparently produces probabilities that don't need correction.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Bracket Simulation}
+
+Brier score is what Kaggle scores on, but most people who fill out a March Madness bracket are doing it for an ESPN pool, where a different objective applies: 10 points for each correct first-round pick, then 20, 40, 80, 160, 320 doubling each round. A bracket that nails all 67 games gets 1920 points. Our 0.159 Brier model is good at predicting probabilities, but how well does it actually pick brackets?
+
+We ran 5{,}000 Monte Carlo simulations on our 2026 predictions. In each simulation we sample a ``true'' bracket from the model's probabilities and then evaluate three strategies for filling the bracket:
+\begin{itemize}[nosep]
+    \item \textbf{Chalk}: always pick the higher seed.
+    \item \textbf{MAP}: pick the team the model thinks is more likely to win.
+    \item \textbf{Sample}: sample winners from the model probability (effectively, fill out a random plausible bracket).
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Bracket strategy comparison (5{,}000 simulations).}
+\label{tab:bracket}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Strategy & Mean & Median & 95th \%ile & vs Chalk \\
+\midrule
+MAP (most likely) & 1112 & 1080 & 1590 & 65.0\% \\
+Chalk (higher seed) & 994 & 970 & 1440 & --- \\
+Sample (probability) & 911 & 860 & 1420 & 36.8\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The MAP strategy beats chalk in 65\% of simulations. Mean expected score is 1112 vs 994 for chalk, an 11.9\% improvement. Sampling does worse than chalk in expectation, which makes sense: sampling reproduces the variance of the model's probabilities, and most of that variance lives in coin-flip games where chalk's deterministic seed-based pick is actually well-calibrated (the higher seed wins about 65\% of close matchups historically).
+
+The 95th-percentile MAP score of 1590 is interesting. It's not a winning bracket in a competitive pool (those usually clear 1700+), but it's competitive with what you'd expect from a careful human picker. The model's edge over chalk comes from a small number of high-confidence upsets it's willing to call, particularly in the 7--10 and 8--9 seed ranges where chalk is essentially a coin flip and our model has actual signal.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{What This All Adds Up To}
+
+Four investigations, all pointing in the same direction. The ablation says Barttorvik does almost all the predictive work, with the rest of the feature set contributing about 0.01 Brier in aggregate. The Hybrid Transformer says the same: when we let the encoder see Barttorvik, it closes most of its gap to the logistic baseline. The calibration analysis says the model is already producing honest probabilities, so there's no easy win from post-hoc fixes. And the bracket simulation says these probabilities, even if not dramatically better than seed-based picks on individual games, do compound into a meaningfully better bracket strategy when aggregated across 67 games.
+
+If we were going to spend two more weeks on this, we'd want to look at whether there are continuous features beyond Barttorvik that aren't captured by the current data---player-level efficiency, injury-adjusted lineups, conference-tournament-specific form---because the team-level aggregate signal looks pretty exhausted. We've gone from 0.199 (seed only) to 0.159 (everything we have access to), and the ablation strongly suggests that floor is set by the available features, not the model.
+
+
+% ══════════════════════════════════════════════════════════════════════════
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem[Murphy(1973)]{murphy1973}
+Murphy, A.~H.
+\newblock A New Vector Partition of the Probability Score.
+\newblock \emph{Journal of Applied Meteorology}, 12(4):595--600, 1973.
+
+\bibitem[Pomeroy(2004)]{pomeroy2004}
+Pomeroy, K.
+\newblock KenPom.com: College Basketball Ratings.
+\newblock \url{https://kenpom.com}, 2004--present.
+
+\bibitem[Barttorvik(2017)]{barttorvik2017}
+Barttorvik.
+\newblock T-Rank: College Basketball Ratings.
+\newblock \url{https://barttorvik.com}, 2017--present.
+
+\end{thebibliography}
+
+\end{document}
