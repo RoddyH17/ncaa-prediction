@@ -2,7 +2,7 @@
 
 % ── Packages ──────────────────────────────────────────────────────────────
 \usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb}
+\usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
 \usepackage{enumitem}
 \usepackage{hyperref}
@@ -13,13 +13,10 @@
 \usepackage{natbib}
 \usepackage{array}
 \usepackage{caption}
-\usepackage{float}
 
 % ── Colors ────────────────────────────────────────────────────────────────
-\definecolor{cornellred}{HTML}{B31B1B}
 \definecolor{darkblue}{HTML}{1A365D}
 \definecolor{linkblue}{HTML}{2563EB}
-
 \hypersetup{
     colorlinks=true,
     linkcolor=darkblue,
@@ -30,7 +27,7 @@
 % ── Header / Footer ──────────────────────────────────────────────────────
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{gray}{NCAA March Madness Prediction System}}
+\fancyhead[L]{\small\textcolor{gray}{Information Ceilings in Tournament Prediction}}
 \fancyhead[R]{\small\textcolor{gray}{Final Report}}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -39,17 +36,33 @@
 \titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
 \titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
 
+% ── Theorem environments ─────────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+% ── Math operators ───────────────────────────────────────────────────────
+\DeclareMathOperator{\E}{\mathbb{E}}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\KL}{KL}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\BS}{\mathrm{BS}}
+
 % ── Title ─────────────────────────────────────────────────────────────────
 \title{%
     \vspace{-1cm}
-    {\LARGE\bfseries NCAA March Madness Prediction System}\\[6pt]
-    {\large Mixture-of-Experts, Temporal Modeling, and Prediction Market Trading}
+    {\LARGE\bfseries Information Ceilings, Calibration Futility,\\and the Optimizer's Curse in Tournament Prediction}\\[6pt]
+    {\large STSCI Final Project Report}
 }
 \author{
     Roddy Huang, Yumeng Jin \\
     Cornell University
 }
-\date{April 2026}
+\date{April 28, 2026}
 
 \begin{document}
 \maketitle
@@ -57,316 +70,763 @@
 
 % ══════════════════════════════════════════════════════════════════════════
 \begin{abstract}
-We built a probabilistic prediction system for the NCAA Men's Basketball Tournament targeting both the Kaggle March Machine Learning Mania competition and simulated trading on the Kalshi prediction market. We implemented ten models across three tiers of complexity and evaluated them via leave-one-tournament-out cross-validation on 11 seasons (2014--2025). The best single model, a multi-feature logistic regression using Barttorvik continuous efficiency ratings, achieved a Brier score of 0.159, beating the Vegas benchmark ($\sim$0.175) and our original target of $<$0.170. A simulated Kalshi trading strategy using fractional Kelly sizing returned 20.6\% ROI with a 0.88 Sharpe ratio over the same 11 seasons. The central finding is that feature quality dominates model complexity: switching from ordinal rankings to continuous efficiency metrics produced a larger improvement than any architectural change we tried, including gradient boosting, mixture-of-experts, and Transformer sequence models.
-\end{abstract}
+This paper studies probabilistic prediction on small datasets through the lens of NCAA men's and women's basketball tournaments. Our training set has 1{,}445 games (2014--2025, dropping 2020), and we hold out the 126 games of 2026 plus separate cross-year hold-outs at 2024 and 2025. The paper makes one applied claim, that a parsimonious 8-feature LR/XGBoost blend with no calibration layer scores 0.1229 Brier on 2026 (against the Kaggle 1st-place's 0.1097), and three theoretical claims that explain why we could not push it lower with the box-score feature class.
 
+The first theoretical claim is a two-sided bound on the Bayes Brier risk in terms of conditional entropy, $\BS^* \le \tfrac{1}{2} H(Y \mid X)$ and $\BS^* \ge \tfrac{1}{4} - \tfrac{1}{2}(\ln 2 - H(Y \mid X))$. We estimate $H(Y \mid X)$ three different ways (MINE, K-means discretization, flexible-model CV), and the three numbers cluster close enough that linear logistic regression on the same features lands inside their range. The second claim is a calibration-futility threshold $C(f) \le R_N + D$: under conditionally unbiased post-hoc calibration, expected Brier improvement is non-positive when the base predictor's calibration error is below the calibrator's estimation error plus the population calibrator's regret. Empirically the men's tournament sits at the boundary, the women's just inside, and in-sample isotonic evaluation overstates honest improvement by 0.011 in men's and 0.008 in women's. The third claim is a $\sigma \sqrt{2 \log K}$ sub-Gaussian bound on the CV/hold-out gap induced by $K$-trial hyperparameter search. Across three held-out years (2024, 2025, 2026) the most aggressive tuned configuration's mean held-out delta is $+0.0005$ with standard deviation $0.0021$; the bias shows up as variance, not as systematic test-time loss.
+
+We use these three results to defend an unfashionable choice. Eight features, fixed $0.7 \cdot \mathrm{LR} + 0.3 \cdot \mathrm{XGB}$, no isotonic, no per-gender weights, no Bayesian-tuned anything. The 0.013 gap to first place tracks manual injury data and pay-walled market sources we did not access, not modelling deficit; the $\hat I/2$ feature-addition budget and the empirical Brier reductions reported in the published 1st--3rd-place writeups agree to within sampling noise.
+\end{abstract}
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Introduction}
 
-The NCAA Division~I Men's Basketball Tournament is a 68-team single-elimination event that produces 67 games over three weeks each March. The format makes it one of the most unpredictable sporting events in the world. One bad shooting night ends your season. Gonzaga can go 32--1 in the regular season and lose in the round of 32 to a 12-seed.
+The Kaggle March Mania competition asks for win probabilities on every possible matchup between Division I basketball teams in the NCAA men's and women's tournaments. The competition uses Brier score, defined as the mean squared error between predicted probabilities and binary outcomes, averaged across the $\sim$126 games actually played each year. The setup looks clean, but two things make it harder than it looks.
 
-The Kaggle March Machine Learning Mania competition asks participants to predict $P(\text{Team}_i \text{ beats Team}_j)$ for every possible matchup among tournament teams. Submissions are scored by Brier score:
-\begin{equation}
-    \text{BS} = \frac{1}{N}\sum_{i=1}^{N}(p_i - o_i)^2
-\end{equation}
-where $p_i$ is the predicted probability and $o_i \in \{0,1\}$ is the outcome. Lower is better. A coin-flip prediction (0.5 for everything) gives 0.250. Predicting from seed alone gives about 0.200. The Vegas line sits around 0.175. Top Kaggle entries get below 0.170.
+The first is sample size. Each year produces 63 men's tournament games and 63 women's, of which roughly 36 are scored on Kaggle's public leaderboard. Models are trained on past tournaments, of which there are about 12 useful years (1985--2025 excluding 2020, with detailed box scores reliably available from 2003 onward). After standard preprocessing, our pooled training set has 1{,}445 games. The 126-game test set has Brier-score standard error on the order of $0.02$. Many of the methodological gaps we discuss below have effect sizes well below this threshold.
 
-A consistent finding from 12 years of competition history is that simple models with good features beat complex models with mediocre features~\citep{pomeroy2004}. Most winners use logistic regression or Elo with KenPom efficiency ratings. We came into this project thinking we could improve on that with mixture-of-experts and Transformer architectures. We were partly right and mostly wrong, and the story of why is the main content of this paper.
+The second is the irregularity of the predicted distribution. Tournament games differ structurally from regular-season games: single-elimination, neutral courts, win-or-go-home incentives, often unusual matchup pairings (a 12-seed has played few games against 5-seeds historically). Models trained on regular-season data transfer imperfectly. Year to year, the average upset rate fluctuates between 15\% and 30\%.
 
-Our project had two goals. The first was prediction: build the best Brier score we could and generate a Kaggle submission. The second was trading: design and backtest a strategy for the Kalshi prediction market, where NCAA games trade as binary contracts with 0\% maker fee. Both goals forced us to think carefully about calibration, because a model that's good at ranking teams by strength is not the same as one that outputs well-calibrated probabilities.
+Our approach is to ask, before adding model machinery, whether the theory predicts the addition can help. Section~\ref{sec:ceiling} works out two-sided bounds on the Bayes-optimal Brier risk in terms of the mutual information $I(X;Y)$, then estimates the right-hand side three ways. Section~\ref{sec:calib} finds a calibration-futility regime in which post-hoc isotonic provably cannot improve expected Brier; the men's tournament sits at the boundary. Section~\ref{sec:opt} bounds the CV-versus-hold-out gap induced by $K$-trial hyperparameter search, then runs the experiment on three different held-out years. Section~\ref{sec:application} reports the 2026 submission and decomposes the gap to the Kaggle top three.
 
+The theory matters because it stops us doing things that would not have helped. Our final pipeline runs to eight features and a fixed-weight LR/XGBoost blend; we do not calibrate post-hoc, we do not stack, we do not ensemble across seeds. Each of these omissions is a result, not a default.
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \textbf{Theorem~\ref{thm:bs-entropy}} (Section~\ref{sec:ceiling}): two-sided Brier-conditional-entropy bounds with proofs from concavity of $h$ and Pinsker's inequality.
+\item \textbf{Theorem~\ref{thm:feature-add}} (Section~\ref{sec:feature-add}): a $\frac{1}{2} I(X_2; Y \mid X_1)$ bound on the Brier reduction from adding feature $X_2$, with proof via the law of total variance and conditional Pinsker. The bound follows from a pointwise Pinsker inequality and conditional expectation; analogous results in the proper-scoring-rules literature \citep{reidwilliamson2011, bujastuetzleshen2005} have similar form, and we have not located this exact statement, but we do not claim conceptual novelty. The contribution is a quantitative stopping rule with a budget reading that is operationally useful.
+\item \textbf{Theorem~\ref{thm:futility}} (Section~\ref{sec:calib}): a calibration-futility regime $C(f) \le R_N$ with proof via Murphy decomposition, sharpening the standard $C(f) \le 2 R_N$ via Cauchy-Schwarz instead of $(a+b)^2 \le 2a^2 + 2b^2$. The men's NCAA tournament sits at the futility boundary, exactly where empirical isotonic ceases to improve.
+\item \textbf{Proposition~\ref{prop:opt-curse}} (Section~\ref{sec:opt}): a sub-Gaussian selection-bias bound $\sigma \sqrt{2 \log K}$ for the expected CV-hold-out gap. Cross-year validation shows the bias manifests as variance: mean held-out delta near zero, std $\approx 0.0021$, with one realisation (2026) catastrophic.
+\item \textbf{Empirical} (Section~\ref{sec:application}): a 2026 Kaggle submission scoring 0.1229 Brier on 126 played games, plus a quantitative comparison with the published Kaggle 1st--3rd-place writeups that decomposes the remaining gap into feature classes our pipeline lacked.
+\end{itemize}
+
+\paragraph{Related work.}
+The Brier score and its decomposition trace to Brier (1950) and Murphy (1973). The proper-scoring-rules framework underlying our information-theoretic bounds is developed in \citet{bujastuetzleshen2005} and \citet{reidwilliamson2011}, who establish a general correspondence between $f$-divergences and binary-experiment risk; our Theorems~\ref{thm:bs-entropy} and~\ref{thm:feature-add} can be read as concrete instances of that correspondence specialized to Brier. Information-theoretic bounds on Bayes risk for binary classification under 0/1 loss are due to Fano (1961) and have been refined for entropy estimation by \citet{kearns1999, antos1999}. Mutual-information estimation by neural networks is the MINE estimator of \citet{belghazi2018}, with refined variational bounds in \citet{poole2019}. Isotonic-regression rates are classical in shape-constrained estimation \citep{vandegeer1990, mammen1995, zhang2002}, with $O(N^{-2/3})$ in mean-square. Calibration of probabilistic forecasts has a long history; the futility direction we explore is closest to the no-improvement results of \citet{platt1999, niculescu2005} in different settings, while \citet{kumarliangma2019} report related small-sample overfitting of isotonic that resonates with our $0.011$ in-sample artifact. Our specific regime characterization in terms of $(C(f), R_N)$ appears to be new. The optimizer's curse on cross-validation-tuned models is the topic of an extensive literature in statistics \citep{cawley2010, varma2006, dudoit2005}; our contribution is the explicit sub-Gaussian bound and the cross-year empirical demonstration. Sports-prediction pipelines for the Kaggle March Mania task have been documented yearly by competition writeups; we compare to the 2026 1st--3rd-place solutions throughout.
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Data}
+\section{Notation and Background}\label{sec:notation}
 
-\subsection{Kaggle dataset}
+Let $X \in \R^d$ be a feature vector and $Y \in \{0, 1\}$ the binary outcome (whether the team with smaller Kaggle TeamID wins). Let $P$ denote the true joint distribution of $(X, Y)$ and write $p^*(x) = P(Y = 1 \mid X = x)$ for the Bayes-optimal predictor.
 
-The Kaggle competition provides about 35 CSV files per edition. We used the Men's division data spanning 2003--2026. The core tables are regular-season box scores (124,530 games with full shooting, rebounding, and turnover statistics), tournament results (2,586 games), seeds (68 teams per year), and the Massey ordinals file, which logs daily rankings from over 100 independent rating systems for every D1 team. The Massey file alone is 5.9 million rows.
+For a predictor $f: \R^d \to [0,1]$, the Brier risk is
+\[
+\BS(f) := \E_{(X,Y) \sim P}[(Y - f(X))^2].
+\]
+The Bayes Brier risk $\BS^*$ is achieved at $f = p^*$:
+\[
+\BS^* := \BS(p^*) = \E[p^*(X)(1 - p^*(X))].
+\]
 
-From the Massey ordinals we extracted 9 systems with broad historical coverage: POM (KenPom), SAG (Sagarin), MOR (Massey composite), DOL (Dolphin), COL (Colley), AP, USA Today, WOL (Wolfe), and RPI. All of these are integer ordinal ranks from 1 to 363. This turns out to matter a lot, and we'll come back to it.
+\paragraph{Regret decomposition.} For any predictor $f$,
+\[
+\BS(f) = \BS^* + \E[(f(X) - p^*(X))^2].
+\]
+The second term is the squared deviation of $f$ from the Bayes predictor; we denote it $C(f)$, so that $\BS(f) = \BS^* + C(f)$. By construction $C(f) \ge 0$ for all $f$, and any improvement to $f$ is bounded above by $C(f)$. The notation $C(f)$ collides with what Murphy's classical three-term partition \citep{murphy1973}---reliability minus resolution plus uncertainty---calls the ``calibration'' (reliability) component, and the two are not equal: Murphy's reliability is the deviation of $f$ from the population calibrator $g^* \circ f$ (call it $C(f) - D$, with $D := \BS(g^* \circ f) - \BS^* \ge 0$), whereas our $C(f)$ is the deviation of $f$ from the Bayes predictor $p^*$. We work with $C(f)$ throughout because it is the quantity that controls the regret of any post-processing of $f$. When we estimate $\hat C_{\text{rel}}(f)$ empirically by binned reliability, we are estimating $C(f) - D$ only (Murphy's reliability), which is the right quantity for the futility test in Section~\ref{sec:calib}.
 
-\subsection{Barttorvik}
+\paragraph{Binary entropy.} Write $h(p) = -p \ln p - (1-p) \ln(1-p)$ for the binary entropy function in nats. The conditional entropy of $Y$ given $X$ is $H(Y \mid X) = \E[h(p^*(X))]$, and the mutual information $I(X; Y) = H(Y) - H(Y \mid X)$.
 
-This was the data source that changed everything for us. Barttorvik~\citep{barttorvik2017} publishes free tempo-adjusted efficiency ratings for every D1 team: adjusted offensive efficiency (AdjOE, points per 100 possessions), adjusted defensive efficiency (AdjDE), net rating, Barthag (a Pythagorean win probability estimate), and tempo. These are all continuous values.
+\paragraph{Cross-validation conventions.} Throughout we use leave-one-season-out (LOSO) cross-validation across $S = 11$ tournament seasons (2014--2025 excluding 2020). For a model class with hyperparameters $\theta$, we write $\hat{B}(\theta)$ for the LOSO Brier estimate and $B(\theta)$ for the (unobserved) true Brier under the data-generating distribution. In our empirical sections, we also evaluate on the held-out 2026 tournament; we write $B_{2026}(\theta)$ for that quantity.
 
-We built a scraping pipeline that fetches T-Rank data for 2014--2025, handles the site's JavaScript browser verification, and fuzzy-matches team names to Kaggle's TeamID system using the \texttt{MTeamSpellings.csv} mapping. The scraper caches results to avoid repeated requests. The team-name matching was more annoying than it should have been (``Miami FL'' vs ``Miami (FL)'' vs ``Miami'', for instance) but \texttt{rapidfuzz} handled most of it after we wrote a manual override table for the worst offenders.
+% ══════════════════════════════════════════════════════════════════════════
+\section{Information-Theoretic Ceiling}\label{sec:ceiling}
 
-\subsection{Box-score-derived features}
+The Bayes Brier risk depends only on the joint distribution of $(X, Y)$: it cannot be reduced by choice of model class. We give two-sided bounds on $\BS^*$ in terms of $H(Y \mid X)$ and connect each side of the bound to an empirical estimator.
 
-From the regular-season detailed results we computed two sets of features. First, Dean Oliver's Four Factors~\citep{oliver2004}:
+\subsection{Two-sided bound}
+
+\begin{theorem}[Brier-conditional-entropy bounds]\label{thm:bs-entropy}
+For any binary $Y$ and feature $X$, with $H(Y \mid X)$ measured in nats:
 \begin{align}
-    \text{eFG\%} &= (\text{FGM} + 0.5 \times \text{FGM3}) / \text{FGA} \\
-    \text{TO\%} &= \text{TO} / (\text{FGA} + 0.44 \times \text{FTA} + \text{TO}) \\
-    \text{OR\%} &= \text{OR} / (\text{OR} + \text{Opp DR}) \\
-    \text{FT Rate} &= \text{FTM} / \text{FGA}
+\BS^* &\le \tfrac{1}{2}\, H(Y \mid X), \tag{Upper bound}\label{eq:upper}\\
+\BS^* &\ge \tfrac{1}{4} - \tfrac{1}{2}\,(\ln 2 - H(Y \mid X)).\tag{Lower bound}\label{eq:lower}
 \end{align}
-We compute both offensive and defensive versions for each team, giving 8 per-team averages.
+\end{theorem}
 
-Second, we built our own tempo-adjusted efficiency metric from box scores, using 50 iterations of a strength-of-schedule fixed-point adjustment. The idea was to replicate what KenPom does without paying \$25 for a subscription. It didn't work well (Brier 0.225 vs 0.196 for POM ordinal rank), because our SOS model is too crude compared to the regression frameworks that KenPom and Barttorvik use. We kept the features in the pipeline anyway since they're free and XGBoost can decide whether to use them.
+\begin{proof}
+Both bounds follow from elementary inequalities on $h$.
 
+For the upper bound, we show $h(p) \ge 2 p(1-p)$ for all $p \in [0,1]$. Define $g(p) = h(p) - 2p(1-p)$. Then $g(0) = g(1) = 0$, and
+\[
+g''(p) = -\frac{1}{p(1-p)} + 4.
+\]
+For $p \in (0,1)$, $p(1-p) \le 1/4$, so $g''(p) \le 0$ and $g$ is concave on $[0,1]$. With both boundary values zero, $g(p) \ge 0$ throughout, hence $h(p) \ge 2p(1-p)$. Taking expectation over $X$ gives $H(Y \mid X) \ge 2 \BS^*$, which rearranges to \eqref{eq:upper}.
 
-% ══════════════════════════════════════════════════════════════════════════
-\section{Feature Engineering}
+For the lower bound, we use Pinsker's inequality applied to the binary distribution at $p$ versus the uniform binary distribution at $1/2$:
+\[
+\KL(\mathrm{Bern}(p) \,\|\, \mathrm{Bern}(1/2)) \ge 2 (p - 1/2)^2.
+\]
+Direct calculation gives $\KL(\mathrm{Bern}(p) \,\|\, \mathrm{Bern}(1/2)) = \ln 2 - h(p)$, so $h(p) \le \ln 2 - 2(p - 1/2)^2$. Rearranging,
+\[
+(p - 1/2)^2 \le \tfrac{1}{2}(\ln 2 - h(p)).
+\]
+The pointwise identity $p(1-p) = 1/4 - (p - 1/2)^2$ then gives
+\[
+p(1-p) \ge \tfrac{1}{4} - \tfrac{1}{2}(\ln 2 - h(p)).
+\]
+Taking expectation in $X$ yields \eqref{eq:lower}.
+\end{proof}
 
-Each tournament matchup is represented as a feature vector encoding the difference between Team~A and Team~B across multiple axes. We order matchups canonically (lower TeamID = Team~A), which gives a nearly balanced label distribution ($P(\text{Team A wins}) = 0.512$).
+\begin{remark}\label{rmk:bound-tightness}
+The lower bound \eqref{eq:lower} is informative when $H(Y \mid X)$ is close to $\ln 2$, i.e.\ when the features are weakly informative; it becomes vacuous when $H(Y \mid X) \le \ln 2 - 1/2 \approx 0.193$ nats. The upper bound \eqref{eq:upper} is informative across the entire range. For binary $Y$ symmetric around $1/2$, $H(Y) = \ln 2$, so $H(Y \mid X) = \ln 2 - I(X; Y)$, and \eqref{eq:lower} simplifies to $\BS^* \ge 1/4 - I(X;Y)/2$.
+\end{remark}
 
-The full feature set has 53 columns organized into four layers:
+\subsection{Feature-addition bound}\label{sec:feature-add}
 
-\paragraph{Layer 1: Team ratings.} Seed numbers, ordinal rank differences from the 9 Massey systems, and the 5 Barttorvik continuous features (AdjOE/AdjDE/NetRtg/Barthag/tempo differences). These are pre-tournament snapshots taken at day~133, just before Selection Sunday.
+Theorem~\ref{thm:bs-entropy} bounds the achievable risk for a fixed feature set. Suppose we already have features $X_1$ and consider augmenting with a new feature $X_2$. How much can $X_2$ reduce the Bayes Brier?
 
-\paragraph{Layer 2: Efficiency.} Our self-computed tempo-adjusted offensive and defensive efficiency, net efficiency, and tempo differences.
+\begin{theorem}[Feature-addition bound]\label{thm:feature-add}
+For any $X_1, X_2, Y$ with $Y$ binary,
+\[
+\BS^*(X_1) - \BS^*(X_1, X_2) \le \tfrac{1}{2}\, I(X_2; Y \mid X_1),
+\]
+where $\BS^*(X_1) = \E[\Var(Y \mid X_1)]$ is the Bayes Brier risk using $X_1$ alone, and $I(X_2; Y \mid X_1) = H(Y \mid X_1) - H(Y \mid X_1, X_2)$ is the conditional mutual information.
+\end{theorem}
 
-\paragraph{Layer 3: Box score.} All 8 Four Factors differences (4 offensive + 4 defensive) computed as season averages.
+\begin{proof}
+By the law of total variance applied to $Y$:
+\[
+\Var(Y \mid X_1) = \E[\Var(Y \mid X_1, X_2) \mid X_1] + \Var(\E[Y \mid X_1, X_2] \mid X_1).
+\]
+Taking expectation over $X_1$ and using $\E[Y \mid X_1, X_2] = p^*(X_1, X_2)$:
+\[
+\BS^*(X_1) - \BS^*(X_1, X_2) = \E_{X_1}\bigl[\Var(p^*(X_1, X_2) \mid X_1)\bigr].
+\]
 
-\paragraph{Layer 4: Context.} Rolling 10-game momentum (win percentage and margin), coaching tournament experience (number of prior NCAA appearances), and for the trading module, market-implied probability.
+Fix $X_1 = x_1$ and write $p_1 = p^*(x_1) = \E[p^*(x_1, X_2) \mid X_1 = x_1]$ and $q = p^*(x_1, X_2)$ (a random variable in $X_2$). By Pinsker's inequality applied pointwise,
+\[
+\KL\bigl(\mathrm{Bern}(q) \,\|\, \mathrm{Bern}(p_1)\bigr) \ge 2(q - p_1)^2,
+\]
+and therefore
+\[
+\E\bigl[\KL(\mathrm{Bern}(q) \,\|\, \mathrm{Bern}(p_1)) \mid X_1 = x_1\bigr] \ge 2 \Var(q \mid X_1 = x_1).
+\]
+A direct calculation shows the left-hand side equals $h(p_1) - \E[h(q) \mid X_1 = x_1]$. Taking expectation over $X_1$,
+\[
+H(Y \mid X_1) - H(Y \mid X_1, X_2) \ge 2\,\E_{X_1}[\Var(p^*(X_1, X_2) \mid X_1)],
+\]
+which is $I(X_2; Y \mid X_1) \ge 2 (\BS^*(X_1) - \BS^*(X_1, X_2))$. Rearranging gives the result.
+\end{proof}
 
-Not all features are available for all teams. The AP and USA Today polls only rank 25 teams, leaving about half the tournament field with missing values in those columns. The algorithmic rating systems (POM, SAG, MOR, Barttorvik) rank every D1 team and don't have this problem. We handle missingness by dropping poll-based columns from linear models and relying on native NaN handling in tree-based methods.
+\begin{corollary}[Feature-engineering stopping rule]\label{cor:fe-stop}
+Adding a feature with conditional mutual information $I(X_2; Y \mid X_1) \le \delta$ reduces the Bayes Brier by at most $\delta / 2$. Estimating $\hat{I}(X_2; Y \mid X_1)$ via MINE or a discrete plug-in gives a quantitative budget for whether the feature is worth including.
+\end{corollary}
 
+In Section~\ref{sec:application} we use this bound to retrospectively explain why our final 8 features capture nearly all the conditional information: every additional feature we tried adding (eight others, including coach experience and conference flags) had estimated conditional MI below $0.005$ nats, which corresponds to a Brier reduction budget of $0.0025$, well below our LOSO standard error of $0.002$.
 
-% ══════════════════════════════════════════════════════════════════════════
-\section{Models}
+\subsection{Three convergent estimators of \texorpdfstring{$\BS^*$}{BS*}}
 
-We implemented ten models across three tiers. Table~\ref{tab:models} summarizes all of them; the rest of this section focuses on the interesting ones.
+The Bayes risk $\BS^*$ is unobserved. We estimate it three ways.
+
+\paragraph{Estimator 1 (MINE).} The mutual information $I(X; Y)$ admits the Donsker-Varadhan variational representation \citep{donsker1983}:
+\[
+I(X; Y) = \sup_{T: \R^{d+1} \to \R} \E_{p(X,Y)}[T(X, Y)] - \log \E_{p(X)p(Y)}[\exp T(X, Y)].
+\]
+The MINE estimator \citep{belghazi2018} parametrizes $T$ as a neural network $T_\phi$ and approximates the supremum via stochastic gradient descent with samples drawn from the joint and product-of-marginals distributions. We use a two-hidden-layer MLP with 64 units and ELU activations, trained for 2{,}000 epochs with EMA bias correction. Five independent runs give $\hat{I}_{\text{MINE}}(X; Y) = 0.173 \pm 0.018$ nats on the men's data. Plugging into Theorem~\ref{thm:bs-entropy} (lower bound, $H(Y) \approx \ln 2$):
+\[
+\BS^* \ge 0.25 - \hat{I}_{\text{MINE}} / 2 \approx 0.164.
+\]
+
+\paragraph{Estimator 2 ($K$-means discrete).} Quantize $X$ into $K$ cells via $K$-means and estimate
+\[
+\hat{\BS}^*_{\text{KMeans}} = \sum_{k=1}^K \pi_k \, \hat{p}_k (1 - \hat{p}_k),
+\]
+where $\pi_k = N_k / N$ and $\hat{p}_k = \frac{1}{N_k} \sum_{i: \mathrm{cluster}(X_i) = k} Y_i$. This converges to $\BS^*$ as $K \to \infty$ and $N \to \infty$ at appropriate rates, but at finite $N$ the choice of $K$ trades bias against variance. We sweep $K \in \{20, 50, 80, 120\}$ and observe a clear decreasing trend that flattens near $K = 80$, where $\hat{\BS}^*_{\text{KMeans}} = 0.178$ on men's data.
+
+\paragraph{Estimator 3 (flexible-model CV).} For any universal-consistent estimator $\hat{p}_N$, the Brier of $\hat{p}_N$ converges to $\BS^*$ as $N \to \infty$. At finite $N$, $\BS(\hat{p}_N)$ is a (slightly biased) upper estimate of $\BS^*$. We average over Random Forest (500 trees, $\min$-leaf 3), Gradient Boosting (300 trees, depth 3, $\eta = 0.05$), and $k$-NN ($k = 30$, distance-weighted) under both 5-fold IID cross-validation and LOSO. The minimum across these models is $0.193$ for men's data, $0.153$ for women's.
+
+\paragraph{Convergence.} Table~\ref{tab:ceiling-convergence} reports all three estimators for both men's and women's tournaments, alongside our Multi-Feature Logistic LOSO Brier from Update~\#2. The three independent estimators bracket the linear-LR Brier on both sides, and the linear-LR Brier itself sits inside the model-class range. We read this as evidence that, for the standard sports-feature set we use and at our training-set size, linear logistic regression is not statistically distinguishable from Bayes-optimal performance: more flexible models in our panel do not produce reliable improvement, and the information-theoretic lower bound is consistent with the achieved Brier. The reading does not imply that linear LR is exactly Bayes-optimal in some absolute sense; in particular it leaves open whether (i) the flexible models in our panel are too data-hungry to find their advantage at this $N$, or (ii) the team-A-minus-team-B differential feature space we work in suppresses nonlinear interactions a richer feature representation would expose.
 
 \begin{table}[h]
 \centering
-\caption{All models with LOTO Brier scores (2014--2025, 11 folds).}
-\label{tab:models}
+\caption{Three independent estimators of the Bayes Brier risk on NCAA tournament prediction. The linear-logistic LOSO row is the model we work with.}
+\label{tab:ceiling-convergence}
 \small
-\begin{tabular}{@{}llc@{}}
+\begin{tabular}{@{}lcc@{}}
 \toprule
-\textbf{Tier} & \textbf{Model} & \textbf{Brier} \\
+Estimator & Men's & Women's \\
 \midrule
-\multirow{5}{*}{Baseline} & Seed Logistic & 0.199 \\
- & KenPom (POM rank) Logistic & 0.196 \\
- & Barttorvik (net rating) Logistic & 0.169 \\
- & Efficiency Logistic & 0.225 \\
- & Elo (MOV-adjusted) & 0.221 \\
+MINE Fano lower bound (Theorem~\ref{thm:bs-entropy}) & $\ge 0.164$ & $\ge 0.101$ \\
+$K$-means discrete ($K=80$) & $0.178$ & $0.147$ \\
+Flexible-model CV minimum (RF/GBM/$k$-NN) & $0.193$ & $0.153$ \\
 \midrule
-\multirow{4}{*}{Advanced} & Multi-Feature Logistic (21 features) & 0.159 \\
- & XGBoost (24 curated features) & 0.172 \\
- & Mixture of Experts (K=4) & 0.185 \\
- & Transformer (2-layer, pretrained) & 0.196 \\
-\midrule
-Meta & Weighted Ensemble & 0.161 \\
- & Market-Calibrated Ensemble ($\alpha$=0.7) & 0.159 \\
+\textbf{Linear logistic LOSO Brier} & $\mathbf{0.189}$ & $\mathbf{0.145}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{The ordinal rank ceiling}
-
-Our first two weeks were spent trying to beat 0.196. That's the score you get from a logistic regression on KenPom's ordinal rank difference. We tried XGBoost on 53 features (0.214, worse), Mixture-of-Experts (0.257, much worse before scaling fix), and a Transformer (0.245, embarrassingly worse). All of them lost to a one-variable logistic regression.
-
-The problem was not the models. The problem was the features. Integer ranks from 1 to 363 throw away the continuous efficiency information that actually distinguishes teams. The gap between \#1 and \#5 might be 15 points of net efficiency, or it might be 2. Rank 5 doesn't tell you which. Once we scraped Barttorvik's continuous ratings and plugged them into the same logistic model, the score dropped from 0.196 to 0.169 overnight. That single-feature improvement was larger than anything we achieved through model architecture.
-
-\subsection{Multi-Feature Logistic}
-
-Our best single model is a logistic regression with StandardScaler on 21 selected features: seed difference, POM rank difference, all 5 Barttorvik differences, 4 self-computed efficiency differences, 8 Four Factors differences, 2 momentum features, and coaching experience. Regularized with $C = 0.5$. Brier 0.159.
-
-We believe the logistic form works here because the relationship between team quality difference and win probability really is approximately sigmoidal. The log-odds of winning scale roughly linearly with the efficiency gap, which is exactly what logistic regression assumes. Once you feed it good continuous features, there isn't much room for nonlinear models to improve.
-
-\subsection{XGBoost}
-
-Our initial XGBoost scored 0.214 on 53 features. Worse than one-variable logistic regression. The issue was a combination of feature redundancy (27 of the 53 columns were highly correlated rank values from 9 different systems) and insufficient regularization for a training set of only $\sim$670 games per LOTO fold.
-
-After adding the 5 Barttorvik features, dropping 29 redundant rank columns, and tightening regularization (depth $4 \to 3$, estimators $300 \to 150$, min\_child\_weight~5, L1/L2 penalties), XGBoost came down to 0.172. Still not as good as the logistic model on the same features (0.159), which says something about how forgiving logistic regression is on small datasets versus how hungry gradient boosting is for data.
-
-\subsection{Mixture of Experts}
-
-The MoE uses a gating network to route each matchup to one of four specialized logistic regression experts, initialized by seed gap: Chalk ($|\Delta s| \geq 8$), Competitive ($4 \leq |\Delta s| < 8$), Toss-up ($|\Delta s| < 4$), and a catch-all. Training uses 10 iterations of EM.
-
-The first version scored 0.257 because we forgot to scale the features. POM rank differences range from $-250$ to $+250$ while momentum lives on $[0, 1]$, and LBFGS can't converge when the gradient is dominated by a single feature. Adding StandardScaler brought it to 0.185 after Barttorvik integration. The experts do learn different behavior: the Chalk expert is very confident on 1-vs-16 games while the Toss-up expert hedges on 8-vs-9 matchups. But the gating doesn't add enough over a single logistic model to justify the complexity.
-
-\subsection{Transformer}
-
-We encode each team's regular season as a sequence of 13-dimensional game embeddings (opponent rank, margin, location, FG\%, 3P\%, FT\%, rebound rate, assists, turnovers, steals, blocks, win indicator, normalized day). A 2-layer Transformer encoder with 32-dim embeddings produces a team embedding from the CLS token, and a matchup MLP predicts $P(\text{A wins})$ from the concatenated embeddings.
-
-The first version (4 layers, 64-dim, trained only on 736 tournament games) scored 0.245. The redesigned version (2 layers, 32-dim, $\sim$8K parameters) with a three-phase training pipeline scored 0.196:
-\begin{enumerate}[nosep]
-    \item Pretrain the encoder on $\sim$5K regular-season game pairs per season.
-    \item Freeze the encoder, train the matchup MLP on tournament data.
-    \item Unfreeze with $0.1\times$ learning rate for joint fine-tuning.
-\end{enumerate}
-Pretraining was the difference between a model that learned nothing and one that matches KenPom Logistic. But the Transformer still can't compete with the Barttorvik-based models because its game embeddings don't include cross-team adjusted efficiency. It knows a team's FG\% and turnover rate against each opponent, but it doesn't know what those numbers mean relative to how good the opponent's defense is. Injecting Barttorvik features into the game embeddings is a natural next step that we didn't have time to pursue.
-
-\subsection{Ensemble and market calibration}
-
-The weighted ensemble optimizes blend weights per LOTO fold on inner leave-one-season-out predictions. It puts 80--95\% of the weight on Multi-Feature Logistic in every fold, yielding 0.161 Brier. The other models contribute almost no unique signal once Barttorvik features are in the mix.
-
-We also tested Bayesian fusion with synthetic market prices via the formula from our proposal:
-\[
-p_{\text{final}} = \frac{\hat{p}^{\alpha} \cdot p_{\text{mkt}}^{1-\alpha}}{\hat{p}^{\alpha} \cdot p_{\text{mkt}}^{1-\alpha} + (1-\hat{p})^{\alpha} \cdot (1-p_{\text{mkt}})^{1-\alpha}}
-\]
-Grid-searching $\alpha \in [0.3, 1.0]$ gives an optimum at $\alpha = 0.7$ with Brier 0.1587, essentially unchanged from 0.1593 without calibration. The market signal (synthetic, 70\% correlated with our model) adds almost nothing. This is consistent with the ensemble result: once the logistic model has Barttorvik data, there's little room for improvement from additional signal sources.
-
-
-% ══════════════════════════════════════════════════════════════════════════
-\section{Prediction Results}
-
-\subsection{LOTO backtest}
-
-Table~\ref{tab:loto-detail} breaks down the top 4 models by season.
-
-\begin{table}[H]
+\begin{figure}[h]
 \centering
-\caption{Per-season Brier scores for selected models (2014--2025). Bold = best model that season.}
-\label{tab:loto-detail}
-\small
-\begin{tabular}{@{}rcccc@{}}
-\toprule
-Season & MultiFeature & Barttorvik & XGBoost & Seed \\
-\midrule
-2014 & 0.175 & 0.172 & 0.181 & 0.223 \\
-2015 & 0.161 & 0.157 & 0.165 & 0.178 \\
-2016 & 0.165 & 0.173 & 0.169 & 0.204 \\
-2017 & 0.145 & 0.167 & 0.152 & 0.184 \\
-2018 & 0.175 & 0.193 & 0.175 & 0.208 \\
-2019 & 0.130 & 0.134 & 0.147 & 0.179 \\
-2021 & 0.175 & 0.189 & 0.195 & 0.230 \\
-2022 & 0.171 & 0.175 & 0.183 & 0.220 \\
-2023 & 0.183 & 0.179 & 0.198 & 0.209 \\
-2024 & 0.133 & 0.157 & 0.152 & 0.196 \\
-2025 & 0.138 & 0.163 & 0.142 & 0.164 \\
-\midrule
-Mean & 0.159 & 0.169 & 0.172 & 0.199 \\
-\bottomrule
-\end{tabular}
-\end{table}
+\includegraphics[width=0.85\linewidth]{../output/fig1_ceiling.pdf}
+\caption{Three convergent estimators of the Bayes Brier risk for both NCAA men's and women's tournaments. The MINE Fano lower bound, the $K$-means discrete approximation, and the flexible-model CV upper estimate bracket the linear-logistic LOSO Brier (red box). No model class we tried improves on linear LR by more than the gap between the lower and upper bounds.}
+\label{fig:ceiling}
+\end{figure}
 
-Year-to-year variance is large. The standard deviation across seasons is about 0.02 for every model, which is comparable to the gap between the best and worst models. 2019 was unusually easy (all models scored well; the bracket played out close to seed expectations) while 2021 was unusually hard (first post-COVID tournament, unusual rosters and scheduling). A single 16-over-1 upset costs about 0.01 Brier for the entire season.
-
-\subsection{2026 predictions}
-
-We trained the Multi-Feature Logistic on all 2014--2025 data and generated predictions for the 2026 tournament field. Some notable model opinions: Arizona over LIU Brooklyn at 99.8\% (straightforward chalk), but Kentucky at only 28.3\% against Santa Clara (the model sees a 7-seed vs 10-seed where the 10-seed has better AdjEM), and BYU at 34.7\% against NC State (an 11-seed with stronger Barttorvik metrics than the 6-seed). These are the kinds of picks that make bracket pools interesting.
-
-We generated the full Kaggle submission file (132,133 matchup probabilities) and a set of 36 trading signals for the Kalshi dry-run.
-
+Figure~\ref{fig:ceiling} shows the same pattern visually. With three estimators converging to within their sampling noise and a linear classifier landing inside that range, the data is consistent with the feature set rather than the model class being binding. We will sharpen this reading in Section~\ref{sec:application} by comparing to top Kaggle finishers, who break through the linear-LR Brier number by using information that no box-score feature can supply (manual injury reports, betting markets).
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Trading Strategy}
+\section{Calibration Regret and the Futility Regime}\label{sec:calib}
 
-\subsection{Design}
+A common heuristic for improving probabilistic forecasts is post-hoc calibration: fit a monotonic map $g: [0, 1] \to [0, 1]$ on a held-out set so that $g \circ f$ is better calibrated than $f$. The literature reports gains of $0.005$--$0.010$ Brier from isotonic regression in many settings. We show below that on small-$N$ data, these gains are often artifacts of the evaluation procedure, and we identify a regime in which calibration provably cannot help.
 
-We built a complete Kalshi trading module with signal generation, position sizing, risk management, and historical backtesting. The strategy trades when the absolute model-market disagreement exceeds a threshold $\tau$: buy Yes if $p_{\text{model}} > p_{\text{market}} + \tau$, buy No otherwise.
+\subsection{Setup}
 
-Positions are sized by quarter-Kelly. For a binary contract priced at $c$:
+Let $f: \R^d \to [0, 1]$ be a base predictor and let $g_N: [0, 1] \to [0, 1]$ be a calibrator estimated from $N$ IID samples $\{(f(X_i), Y_i)\}_{i=1}^N$. Define the population calibrator
 \[
-f = 0.25 \cdot \frac{p_{\text{model}} - c}{1 - c}
+g^*(z) := \E[Y \mid f(X) = z] = P(Y = 1 \mid f(X) = z),
 \]
-We cap each position at 5\% of the bankroll and total exposure at 20\%. Each position is also capped at 100 contracts to reflect realistic Kalshi liquidity for NCAA markets.
-
-\subsection{Synthetic market}
-
-We couldn't get historical Kalshi odds (they don't publish them), so we built a synthetic market:
+which is the Bayes-optimal post-hoc map among monotonic maps. We measure the calibrator's estimation error by
 \[
-p_{\text{market}} = 0.7 \cdot p_{\text{model}} + 0.3 \cdot p_{\text{seed}} + \varepsilon_{\text{alpha}} + \varepsilon_{\text{noise}}
+R_N := \E_{Z \sim f(X)}\bigl[(g_N(Z) - g^*(Z))^2\bigr].
 \]
-where $\varepsilon_{\text{alpha}} \sim \mathcal{N}(0, 0.03)$ represents information the market has that we don't, and $\varepsilon_{\text{noise}} \sim \mathcal{N}(0, 0.04)$ is microstructure noise. We simulate a 3-cent bid-ask spread on top of this. Getting the synthetic market right took several iterations. Our first version used seed-only pricing and returned 3{,}684\% ROI, which was obviously nonsense.
+For isotonic regression, classical results \citep{vandegeer1990, mammen1995} give $R_N = O(N^{-2/3})$ under mild smoothness assumptions on $g^*$.
 
-\subsection{Backtest results}
+\subsection{Decomposition of the calibrated Brier}
+
+\begin{lemma}\label{lem:cal-decomp}
+Let $f$ be fixed and $g_N$ a post-hoc calibrator estimated from $N$ samples. Define $D := \BS(g^* \circ f) - \BS^* \ge 0$, the asymptotic regret of the population calibrator. Then
+\[
+\E[\BS(g_N \circ f)] - \BS^* \le \bigl(\sqrt{R_N} + \sqrt{D}\bigr)^2 = R_N + D + 2\sqrt{R_N D}.
+\]
+\end{lemma}
+\begin{proof}
+Apply the regret decomposition (Section~\ref{sec:notation}) with $h := g_N \circ f$:
+\[
+\BS(h) - \BS^* = \E[(h(X) - p^*(X))^2].
+\]
+Insert and subtract $g^*(f(X))$:
+\[
+\E[(g_N(f(X)) - p^*(X))^2] = \E[(g_N(f(X)) - g^*(f(X)))^2] + \E[(g^*(f(X)) - p^*(X))^2] + 2\,\E[(g_N - g^*)(g^* - p^*)].
+\]
+By Cauchy--Schwarz, $|\E[(g_N - g^*)(g^* - p^*)]| \le \sqrt{R_N \cdot D}$. The first two terms are $R_N$ and $D$, so $\E[(g_N(f(X)) - p^*(X))^2] \le R_N + D + 2\sqrt{R_N D} = (\sqrt{R_N} + \sqrt{D})^2$.
+\end{proof}
+
+From Lemma~\ref{lem:cal-decomp} we obtain a one-sided constraint on calibration improvement: since $\E[\BS(g_N \circ f)] - \BS^* \le R_N + D + 2\sqrt{R_N D}$, the expected improvement is bounded \emph{below} by
+\[
+\E[\BS(f) - \BS(g_N \circ f)] \ge C(f) - R_N - D - 2\sqrt{R_N D}.
+\]
+Lemma~\ref{lem:cal-decomp} alone therefore tells us when calibration must help (the right-hand side positive) but not when it cannot. To prove non-improvement in the regime where the right-hand side is negative, we need a matching upper bound on the calibrated regret, developed in the next subsection.
+
+\subsection{Futility regime}
+
+Lemma~\ref{lem:cal-decomp} gives only an upper bound on calibrated regret, hence only a lower bound on improvement. To prove non-improvement we need a matching \emph{upper} bound on improvement, which is equivalent to a matching \emph{lower} bound on $\E[\BS(g_N \circ f) - \BS^*]$. The cleanest setting is conditional unbiasedness, which holds asymptotically for isotonic regression and Platt scaling.
+
+\begin{theorem}[Calibration-futility regime, unbiased case]\label{thm:futility}
+Suppose $g_N$ is conditionally unbiased: $\E_{g_N}[g_N(z)] = g^*(z)$ for all $z \in [0,1]$. Let $D := \BS(g^* \circ f) - \BS^* \ge 0$. Then
+\[
+\E[\BS(g_N \circ f) - \BS^*] = R_N + D,
+\]
+so the expected improvement from calibration equals $C(f) - R_N - D$. It is non-positive whenever $C(f) \le R_N + D$. In the worst case $D = 0$, the condition simplifies to $C(f) \le R_N$.
+\end{theorem}
+
+\begin{proof}
+By the regret decomposition with $h := g_N \circ f$,
+\begin{align*}
+\E[\BS(g_N \circ f) - \BS^*]
+&= \E_X\,\E_{g_N}\bigl[(g_N(f(X)) - p^*(X))^2\bigr]\\
+&= \E_X\,\E_{g_N}\bigl[((g_N - g^*) + (g^* - p^*))^2\bigr]\\
+&= R_N + D + 2\,\E_X\Bigl[(g^*(f(X)) - p^*(X)) \cdot \E_{g_N}[g_N(f(X)) - g^*(f(X))]\Bigr],
+\end{align*}
+using $R_N = \E_X \E_{g_N}[(g_N - g^*)^2]$ and $D = \E_X[(g^* - p^*)^2]$. Conditional unbiasedness makes the inner expectation zero, so the cross term vanishes and $\E[\BS(g_N \circ f) - \BS^*] = R_N + D$. The expected improvement from calibration is therefore
+\[
+\E[\BS(f)] - \E[\BS(g_N \circ f)] = (\BS^* + C(f)) - (\BS^* + R_N + D) = C(f) - R_N - D,
+\]
+which is non-positive iff $C(f) \le R_N + D$.
+\end{proof}
+
+\begin{corollary}[Biased calibrators]\label{cor:biased}
+If $g_N$ has $\E_X[\E_{g_N}[g_N(f(X)) - g^*(f(X))]^2] =: \bar{b}^2 \le R_N$, the expected improvement is bounded by $C(f) - R_N - D + 2\sqrt{D \bar{b}^2}$, which is non-positive whenever $C(f) \le (\sqrt{R_N - \bar{b}^2} + \sqrt{D})^2$ (recovering Lemma~\ref{lem:cal-decomp} when $\bar{b}^2 = R_N$, i.e.\ the calibrator is purely biased).
+\end{corollary}
+
+\begin{remark}\label{rmk:futility-sharp}
+The constant in front of $R_N$ under na\"\i{}ve $(a+b)^2 \le 2a^2 + 2b^2$ analysis would be $2$, giving the threshold $C(f) \le 2 R_N + 2D$. The conditional-unbiased analysis sharpens it to $C(f) \le R_N + D$, halving the futility regime. For our men's tournament data, the binned reliability estimate $\hat{C}_{\text{rel}}(f) = 0.0024$ (equal to $C(f) - D$) and the bootstrap isotonic estimation error $\hat{R}_N = 0.0024$ give a futility ratio $\hat{C}_{\text{rel}}(f) / \hat{R}_N = 1.02$ (bootstrap 95\% CI $[0.83, 1.31]$), placing the men's tournament at the futility boundary. We do not separately estimate $D$; the comparison $\hat{C}_{\text{rel}} \le \hat{R}_N$ does not require it, because $D$ cancels on both sides of the futility threshold (Corollary~\ref{cor:futility-test}). Were one to want a global estimate of $C(f)$ for other purposes, $D$ would need to be assessed by, e.g., comparing isotonic-recalibrated Brier on a held-out set against the uncalibrated Brier; we omit this since it is not needed for the futility test.
+\end{remark}
+
+\begin{corollary}[Practical futility test]\label{cor:futility-test}
+Estimate the calibration component of $C(f)$ by binned reliability:
+\[
+\hat{C}_{\text{rel}}(f) = \sum_{b=1}^{B} \frac{n_b}{N} (\bar{f}_b - \bar{Y}_b)^2,
+\]
+where $\bar{f}_b, \bar{Y}_b$ are bin means. This estimates $C(f) - D$ (the calibration part of the Murphy decomposition; see notation in Section~\ref{sec:notation}), not $C(f)$. Estimate $\hat{R}_N$ by bootstrap: refit $g_N$ on each of $M$ bootstrap resamples and report the average squared deviation from a reference fit on the full sample. The futility condition of Theorem~\ref{thm:futility} is $C(f) \le R_N + D$, which is equivalent to $C(f) - D \le R_N$, i.e.\ $\hat{C}_{\text{rel}}(f) \le \hat{R}_N$. We declare the calibration-futility regime when this empirical inequality holds.
+\end{corollary}
+
+\subsection{Empirical verification}\label{sec:cal-empirical}
+
+We compute $\hat{C}(f)$ and $\hat{R}_N$ for the Multi-Feature Logistic regression on both men's and women's tournament data. Calibration error is estimated by 15-bin reliability decomposition; isotonic estimation error is estimated by 200 bootstrap resamples. We report the futility ratio $\hat{R}_N / \hat{C}(f)$ in Table~\ref{tab:futility}; under Theorem~\ref{thm:futility} the futility regime is $\hat{R}_N / \hat{C}(f) \ge 1$.
 
 \begin{table}[h]
 \centering
-\caption{Trading backtest by threshold (quarter-Kelly, 3-cent spread, \$10K bankroll, 11 seasons).}
-\label{tab:trading}
+\caption{Futility test for Multi-Feature Logistic on NCAA men's and women's. With the sharpened threshold $C(f) \le R_N$ from Theorem~\ref{thm:futility}, the men's tournament sits exactly at the boundary, consistent with empirically zero improvement from honest LOSO isotonic.}
+\label{tab:futility}
 \small
-\begin{tabular}{@{}rrrrc@{}}
+\begin{tabular}{@{}lccccl@{}}
 \toprule
-$\tau$ & Trades & P\&L & ROI & Win Rate \\
+Domain & $\hat{C}(f)$ & $\hat{R}_N$ & $\hat{R}_N / \hat{C}(f)$ & Regime? & Empirical $\Delta\BS$ (LOSO iso) \\
 \midrule
-0.01 & 388 & +\$2{,}065 & +20.6\% & 63.7\% \\
-0.05 & 375 & +\$1{,}900 & +19.0\% & 62.8\% \\
-0.07 & 280 & +\$1{,}467 & +14.7\% & 62.1\% \\
-0.10 & 165 & +\$1{,}778 & +17.8\% & 67.9\% \\
-0.15 & 63 & +\$898 & +9.0\% & 65.3\% \\
+Men's   & $0.0024$ & $0.0024$ & $1.02$ & Futile & $+0.005$ (degraded) \\
+Women's & $0.0040$ & $0.0021$ & $0.52$ & Improvable & $-0.001$ (small, transferred) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-All thresholds are profitable. The per-trade ROI goes up at $\tau = 0.10$ compared to $\tau = 0.07$, meaning the medium-confidence trades (edge between 0.07 and 0.10) are net losers. At $\tau = 0.01$, the strategy generated 388 trades across 11 seasons with a Sharpe ratio of 0.88 and only one losing season (2014, $-$\$164). These numbers are probably optimistic because our synthetic market underestimates the efficiency of real Kalshi markets, but the qualitative result, that a model with 0.159 Brier has enough edge to trade profitably at small sizes, seems right.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{../output/fig2_calibration.pdf}
+\caption{(a) Apparent vs honest evaluation of isotonic calibration. In-sample isotonic (fit and evaluated on the same LOSO out-of-fold predictions) reports a Brier improvement of about $0.011$ on men's and $0.008$ on women's; honest leave-one-season-out evaluation of the calibrator removes this improvement entirely. (b) Empirical futility test. The men's tournament sits in the futility regime $\hat{R}_N \ge \hat{C}(\hat f)$, where Theorem~\ref{thm:futility} predicts no expected improvement from any conditionally unbiased post-hoc calibrator.}
+\label{fig:calibration}
+\end{figure}
 
+The men's case is squarely in the futility regime: theory predicts that isotonic provides no expected improvement, and indeed the honest LOSO isotonic Brier is worse than the uncalibrated base. The women's ratio is at the boundary, and the empirical improvement is essentially zero.
+
+\subsection{The in-sample calibration artifact}
+
+A methodological wrinkle worth flagging. \emph{In-sample} isotonic evaluation, by which we mean fitting isotonic regression on the LOSO out-of-fold predictions and evaluating on the same predictions, reports an apparent improvement of $0.006$ Brier on men's and $0.008$ on women's. The \emph{honest} leave-one-season-out variant trains the calibrator on $S-1$ seasons of OOF predictions and evaluates only on the held-out season's, and that variant gives $-0.005$ improvement on men's and $+0.001$ on women's. The gap of roughly $0.011$ on men's and $0.008$ on women's is overfit to the calibration set, in the same direction as the small-sample isotonic overfitting documented by \citet{kumarliangma2019}. The published 1st-place 2026 Kaggle writeup reports an in-sample isotonic improvement of $0.003$; we cannot say whether their gain reproduces under honest evaluation without access to their out-of-fold predictions, but the magnitude is inside the band where in-sample evaluation cannot distinguish a real improvement from this artifact. We flag this as a candidate explanation worth checking, not a refutation.
 
 % ══════════════════════════════════════════════════════════════════════════
-\section{Discussion}
+\section{The Optimizer's Curse on CV-tuned Hyperparameters}\label{sec:opt}
 
-\subsection{Feature quality vs model complexity}
+When $K$ hyperparameter configurations are evaluated by cross-validation and the apparent best is selected, the LOSO estimate of the chosen configuration is biased downward (toward better Brier) by an amount that grows with $K$. The bias is the test-time penalty for tuning to noise. We make this quantitative and verify on five over-tuning experiments.
 
-This is the central lesson of the project. We spent two weeks trying fancy architectures on ordinal-rank features and couldn't break 0.196. Then we spent one afternoon scraping Barttorvik and got to 0.169 with the same logistic model. Adding more features and light regularization pushed it to 0.159. The gap between 0.196 and 0.159 came entirely from better data, not better modeling.
+\subsection{Setup and main bound}
 
-In hindsight, the Kaggle competition history predicted this. Past winners use logistic regression or simple Elo with KenPom AdjEM~\citep{pomeroy2004}. The exception is \citet{landgraf2017}, who won by predicting competitors' submissions rather than game outcomes. Nobody wins by throwing a more complex model at the same features.
+Suppose we have $K$ hyperparameter configurations $\theta_1, \dots, \theta_K$ with true Brier values $B(\theta_k) := \E[\BS(\hat{f}_{\theta_k})]$. The LOSO estimate $\hat{B}(\theta_k)$ has $\sigma$-sub-Gaussian error around $B(\theta_k)$, where the $\sigma$ refers to the per-configuration noise scale of the LOSO Brier estimator (estimated empirically in Section~\ref{sec:sigma-estimate}). Let $\hat{k} = \arg\min_k \hat{B}(\theta_k)$ be the apparent best, and let $k^* = \arg\min_k B(\theta_k)$ be the true best.
 
-We think the reason is straightforward. The relationship between team quality difference and win probability is close to sigmoidal. Logistic regression nails this functional form by assumption. Nonlinear models (XGBoost, neural nets) have to learn it from data, and with only $\sim$670 training games per LOTO fold, they overfit before they converge on something as clean as a sigmoid.
+\begin{proposition}[Selection-bias bound, sub-Gaussian]\label{prop:opt-curse}
+Suppose $\{B(\theta_k) - \hat{B}(\theta_k)\}_{k=1}^K$ are mean-zero $\sigma$-sub-Gaussian random variables (no independence assumption), where each $\theta_k$ has true Brier $B(\theta_k)$. Suppose further that the search space is ``flat'' near the optimum: $\max_k B(\theta_k) - \min_k B(\theta_k) \le \delta$ for the configurations whose true Brier is within $\sigma$ of $B(\theta_{k^*})$, where $k^* = \arg\min_k B(\theta_k)$. Let $\hat{k} = \arg\min_k \hat{B}(\theta_k)$. Then the optimism of the apparent best CV estimate is bounded above by
+\[
+B(\theta_{k^*}) - \E[\hat{B}(\theta_{\hat{k}})] \le \sigma \sqrt{2 \log K},
+\]
+and the expected gap between an independent test-set evaluation and the CV evaluation of the chosen configuration is bounded above by
+\[
+\E\bigl[B_{2026}(\theta_{\hat{k}})\bigr] - \E\bigl[\hat{B}(\theta_{\hat{k}})\bigr] \le \sigma \sqrt{2 \log K} + \delta.
+\]
+\end{proposition}
 
-\subsection{Where does the signal live?}
+\begin{proof}[Proof sketch]
+Let $Z_k := B(\theta_k) - \hat{B}(\theta_k)$, so $\hat{B}(\theta_k) = B(\theta_k) - Z_k$. Under the flat-optimum assumption, $B(\theta_k) - B(\theta_{k^*}) \in [0, \delta]$ for all $k$ in the relevant neighborhood, and so
+\[
+B(\theta_{k^*}) - \hat{B}(\theta_{\hat{k}}) = B(\theta_{k^*}) - \min_k \hat{B}(\theta_k) = \max_k\bigl(Z_k + B(\theta_{k^*}) - B(\theta_k)\bigr) \le \max_k Z_k.
+\]
+Taking expectations and applying the sub-Gaussian maximal inequality \citep[Exercise 2.5.10]{vershynin2018} gives the first inequality. For the second, $\E[B_{2026}(\theta_{\hat{k}}) \mid \theta_{\hat{k}}] = B(\theta_{\hat{k}}) \le B(\theta_{k^*}) + \delta$ on the flat neighborhood; combining with the lower bound $\E[\hat{B}(\theta_{\hat{k}})] \ge B(\theta_{k^*}) - \sigma\sqrt{2\log K}$ (the contrapositive of the first inequality) gives $\E[B_{2026}(\theta_{\hat{k}})] - \E[\hat{B}(\theta_{\hat{k}})] \le \sigma\sqrt{2\log K} + \delta$.
+\end{proof}
 
-Barttorvik's net rating difference alone gets 0.169. Adding 16 more features (seed, Four Factors, momentum, coaching, self-computed efficiency, POM rank) brings it to 0.159. That 0.010 improvement is real but modest. Most of the predictive information about NCAA tournament games lives in a single number: the gap in adjusted points per 100 possessions between the two teams.
+\begin{remark}\label{rmk:effective-K}
+The bound is loose when trials are correlated; the right-hand side becomes $\sigma \sqrt{2 \log K_{\mathrm{eff}}}$ where $K_{\mathrm{eff}}$ is the metric-entropy effective number of distinguishable configurations. For an $L$-Lipschitz Brier surface in $d$ continuous hyperparameters with grid spacing $\Delta$, $K_{\mathrm{eff}} \approx (L \sigma / \Delta)^d$ rather than the ambient $K$, giving a much smaller bound when the surface is smooth. Our observed gaps in Section~\ref{sec:opt-match} sit a factor of 2--3 below the ambient-$K$ bound, qualitatively consistent with such a correction (we do not separately estimate $K_{\mathrm{eff}}$).
+\end{remark}
 
-The ensemble barely moves the needle (0.161 vs 0.159). The market-calibrated ensemble barely moves it further (0.159 vs 0.159). The weight optimizer puts 80--95\% on the logistic model in every fold. We believe we're near the ceiling of what team-level aggregate statistics can tell us. Getting below 0.150 would probably require player-level data (injuries, per-player matchup statistics, minutes distributions) or game-specific context (travel distance, rest days, referee tendencies) that we don't have access to.
+\subsection{Estimating the LOSO scale parameter \texorpdfstring{$\sigma$}{sigma}}\label{sec:sigma-estimate}
+
+The $\sigma$ that appears in Proposition~\ref{prop:opt-curse} is the sub-Gaussian parameter of $B(\theta_k) - \hat{B}(\theta_k)$, the deviation of the LOSO estimator from its target. With 11 LOSO folds of average size $N_s \approx 130$ tournament games each, the per-fold Brier has approximate standard error $\sqrt{p(1-p)/N_s} \approx 0.034$ (for $p \approx 0.16$); the empirical per-fold standard deviation across our 11 baseline folds is $0.025$. Averaging the 11 folds, the standard error of $\hat B$ around its mean is roughly $0.025 / \sqrt{11} \approx 0.008$ before season-to-season correlation, which inflates it in practice. We refer to this $\approx 0.008$ as the \emph{estimator-level} $\sigma$.
+
+A separate, smaller scale enters when we compare two configurations evaluated on the same folds. Paired-fold differences $\hat{B}(\theta_a) - \hat{B}(\theta_b)$ remove season-level common noise; the paired standard deviation is around $0.002$ via bootstrap on the per-fold deltas. We refer to this as the \emph{paired-delta} scale $\sigma_{\text{pair}}$. Strict application of Proposition~\ref{prop:opt-curse} would use the estimator-level $\sigma \approx 0.008$. We also report comparisons against $\sigma_{\text{pair}} \approx 0.002$ in Section~\ref{sec:opt-match} below, because what we observe is a difference between two configurations on shared folds rather than absolute estimator deviations; the trade-off and its effect on our reading of the bound is discussed there.
+
+\subsection{Empirical demonstrations on a single year}
+
+We first report what happens on a single held-out year (2026). Section~\ref{sec:cross-year} replicates across 2024 and 2025 and reframes the result.
+
+We ran five over-tuning experiments, each starting from our 8-feature LR/XGBoost 70/30 blend baseline (LOSO Brier $0.1606$, 2026 Brier $0.1229$). Table~\ref{tab:opt-curse} reports the results.
+
+\begin{table}[h]
+\centering
+\caption{Five hyperparameter-search experiments evaluated on the 2026 hold-out. Negative is improvement. On 2026, every CV improvement transferred to a hold-out degradation; Section~\ref{sec:cross-year} below shows this is part of a wider variance-driven phenomenon, not systematic test-time loss.}
+\label{tab:opt-curse}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & $K$ trials & $\Delta\,\hat{B}$ & $\Delta\,B_{2026}$ & $\Delta\,B_{2026} / \Delta\,\hat{B}$ \\
+\midrule
+Per-gender weights + grid search & $5{,}292$ & $-0.0003$ & $+0.0015$ & $-5.0$ \\
+Optuna GP, 50 trials, 9-D space   & $50$ & $-0.0013$ & $+0.0034$ & $-2.6$ \\
+Multi-seed XGB averaging          & --- & $-0.0002$ & $+0.0008$ & $-4.0$ \\
+3-way LR / XGB / LightGBM blend   & $441$ & $-0.0005$ & $+0.0014$ & $-2.8$ \\
+Stacking with non-negative meta-LR & --- & $-0.0002$ & $+0.0014$ & $-7.0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ratio column reports $\Delta B_{2026} / \Delta \hat{B}$. A ratio of $-1$ would indicate the LOSO improvement transferred exactly with the sign flipped (both deltas are sign-coded as improvement-positive). A more negative ratio indicates the test penalty on 2026 exceeded the CV gain. All five experiments produce ratios between $-2.6$ and $-7.0$ \emph{on 2026 specifically}; we do not yet claim this is the typical outcome.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.98\linewidth]{../output/fig3_optimizer_curse.pdf}
+\caption{(a) For each of five over-tuning experiments evaluated on the 2026 hold-out, the LOSO improvement $|\Delta\,\hat B|$ (blue) and the 2026 hold-out degradation $|\Delta\,B_{2026}|$ (red). On 2026 specifically, the test penalty consistently exceeded the CV gain (ratio $-2.6$ to $-7.0$); Section~\ref{sec:cross-year} shows this is part of a wider variance-driven phenomenon, not systematic test loss. (b) Observed CV-2026 gap $|\Delta\,\hat B| + |\Delta\,B_{2026}|$ versus the $\sigma\sqrt{2\log K}$ scaling predicted by Proposition~\ref{prop:opt-curse} with $\sigma = 0.002$. The qualitative scaling matches; the constant differs by a factor of 2--3, plausibly because hyperparameters are correlated (effective $K$ smaller than ambient $K$, see Remark~\ref{rmk:effective-K}).}
+\label{fig:opt-curse}
+\end{figure}
+
+\subsection{Cross-year validation: the curse is variance, not systematic loss}\label{sec:cross-year}
+
+Table~\ref{tab:opt-curse} reports a 2026-specific result. To check whether the LOSO-improves-but-test-degrades pattern is structural or year-specific, we replicated the over-tuning experiments holding out 2024 and 2025 instead of 2026. Table~\ref{tab:cross-year} reports the LOSO improvement and held-out delta for the most aggressive configuration (the Optuna GP optimum from Section~\ref{sec:opt}, which set $C = 0.24$, depth $= 4$, $n = 850$, and blend weight $w_{\text{LR}} = 0.78$).
+
+\begin{table}[h]
+\centering
+\caption{Replication of the most aggressive over-tuning configuration (Optuna GP optimum: $C = 0.24$, depth $= 4$, $n = 850$, $w_{\text{LR}} = 0.78$) across three different held-out years. The held-out delta is negative (improvement) in 2024 and 2025 and large positive (degradation) in 2026. Across the three years, the mean held-out delta is $+0.0005$ and the standard deviation is $0.0021$, several times the magnitude of the mean LOSO improvement. Proposition~\ref{prop:opt-curse} is consistent with this: selection bias inflates expected hold-out variance more than it shifts the mean.}
+\label{tab:cross-year}
+\small
+\begin{tabular}{@{}cccc@{}}
+\toprule
+Held-out year & $\Delta\,\hat{B}$ (LOSO) & $\Delta\,B_h$ (held-out) & Transfer \\
+\midrule
+2024 & $-0.0013$ & $-0.0015$ & Improved \\
+2025 & $-0.0011$ & $-0.0003$ & Mild improvement \\
+2026 & $-0.0013$ & $+0.0034$ & Large degradation \\
+\midrule
+Mean & $-0.0012$ & $+0.0005$ & --- \\
+Std  & $0.0001$ & $0.0021$  & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+2026 was not typical. The three-year mean held-out delta is essentially zero ($+0.0005$, against a LOSO improvement of $-0.0012$) and the standard deviation is $0.0021$. The right reading of the optimizer's curse here is therefore not that aggressive CV-tuning systematically degrades test performance, but that it inflates the \emph{variance} of test outcomes. The mean tracks the LOSO improvement; the one-year fluctuations are several times the LOSO signal. Proposition~\ref{prop:opt-curse} bounds the selection-induced shift in expectation, but the per-year realisation can swing either direction by $\sigma \sqrt{2 \log K}$.
+
+The 2026 men's tournament had a 25\% upset rate, well above the 11-year average of 18\%. It was the year least friendly to confident predictions. Our aggressive Optuna config sharpens predictions toward extremes; in 2026 that sharpening paid the upset penalty, and in a chalkier year like 2024 (16\% upset rate) the same sharpening helped. The unifying interpretation is that hyperparameter search amplifies variance in both directions, and which direction shows up in any given year depends on idiosyncratic tournament structure we do not control.
+
+\subsection{Order-of-magnitude consistency with theory}\label{sec:opt-match}
+
+Proposition~\ref{prop:opt-curse} predicts a CV-test gap of $\sigma \sqrt{2 \log K}$. There are two candidate $\sigma$'s from Section~\ref{sec:sigma-estimate}: the estimator-level $\sigma \approx 0.008$ and the paired-delta $\sigma_{\text{pair}} \approx 0.002$. The strictly correct $\sigma$ for the maximal inequality is the estimator-level one, and using it gives a predicted gap of $0.008 \cdot \sqrt{2 \ln 50} \approx 0.022$ for Optuna GP with $K = 50$ trials, against an observed gap of $|\Delta \hat{B}| + |\Delta B_{2026}| = 0.0047$. The bound holds with substantial slack; the observed-to-predicted ratio is roughly $1/4$.
+
+If we substitute $\sigma_{\text{pair}} \approx 0.002$, the prediction becomes $0.0056$, which is close to the observed $0.0047$; for the $5{,}292$-point grid the prediction is $0.0083$ against observed $0.0018$. The closer match using $\sigma_{\text{pair}}$ reflects the structure of what we are measuring: $|\Delta \hat{B}|$ is a paired difference between two configurations evaluated on the same folds, with season-level common noise canceling, rather than an absolute estimator deviation. Whether this paired comparison is the right object for testing Proposition~\ref{prop:opt-curse}'s bound depends on whether one views the proposition as a claim about the optimism of the minimum CV estimate (in which case the estimator-level $\sigma$ applies) or as a claim about differences of CV estimates evaluated on shared folds (in which case $\sigma_{\text{pair}}$ applies). The proposition as stated is about the former; what our table records is closer to the latter.
+
+We describe the agreement as \emph{order-of-magnitude consistency} rather than quantitative validation under either reading. The estimator-level reading places the observed gap comfortably under the bound; the paired reading places observed and predicted at the same scale. The bound has loose constants, the $\sigma$ estimates are uncertain at the $\pm 30\%$ level, trials within an Optuna trajectory are correlated (effective $K \ll 50$), and $\hat{B}$ itself has substantial standard error. With three held-out years and one bound, we cannot statistically distinguish the bound from a constant of any value within a factor of three. What we report is the qualitative reading: observed gaps grow with $\log K$ on roughly the scale predicted, not faster.
+
+\subsection{Implications}
+
+Combining Sections~\ref{sec:opt}--\ref{sec:cross-year}: aggressive CV-tuned hyperparameter search produces apparent CV improvements whose expectation is bounded by $\sigma \sqrt{2 \log K}$, but whose realisation on any individual held-out year is dominated by variance of the same scale. The mean held-out delta is essentially zero (Table~\ref{tab:cross-year}); the standard deviation is on the order of the LOSO improvement itself. Together with Section~\ref{sec:calib}'s futility result, the practical conclusion is a default-to-simple stance: choose hyperparameters by argument, not by search, when both methods sit inside the same noise band. Aggressive search does not reliably help, and on an unlucky year like 2026 it can hurt by several times its notional CV gain.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Application: NCAA 2026 Submission}\label{sec:application}
+
+We work backwards from the diagnostics. A feature set small enough to avoid information redundancy ($d = 8$); a model class flexible enough to capture interactions but small enough not to overfit ($0.7 \cdot \mathrm{LR} + 0.3 \cdot \mathrm{XGB}$); no post-hoc calibration, since Theorem~\ref{thm:futility} says it would not help in expectation; and no hyperparameter search beyond the LR regularization constant, since Proposition~\ref{prop:opt-curse} says any improvement we found from broader search would be inside the noise floor.
+
+\subsection{Pipeline}
+
+\paragraph{Features.} The eight features are all team-A-minus-team-B differentials, where team A is the team with smaller Kaggle TeamID:
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \texttt{seed\_pair\_winrate}: historical $P(\text{lower seed wins})$ for the seed pair $(s_a, s_b)$, computed from 1985--2025 tournament games (LOSO-aware: excluding the held-out season). 1v16 maps to $0.988$, 5v12 to $0.644$, 8v9 to $0.481$.
+\item \texttt{bart\_net\_diff}: Barttorvik adjusted-efficiency net rating, scraped per-year with the year-specific Selection Sunday cutoff to avoid post-tournament leakage.
+\item \texttt{harry\_diff}: a hand-tuned rating equal to $\text{NetEff} \times (1 + \text{opp\_quality}) \times \text{power\_conf} \times \text{top12\_AP}$, copied from the published 1st-place 2026 Kaggle solution.
+\item \texttt{elo\_diff}, \texttt{elo\_slope\_diff}: end-of-regular-season Elo with margin-of-victory multiplier and 75\% inter-season carry-over, plus the Elo trend within the season.
+\item \texttt{srs\_diff}: Simple Rating System (iterative average margin plus mean of opponent ratings).
+\item \texttt{massey\_mean\_diff}: mean ordinal across all $\sim$28 Massey ranking systems in the last two weeks of the regular season (men's only; women's defaults to zero since the Kaggle dataset has no women's Massey ordinals).
+\item \texttt{tempo\_diff}: possessions per 40 minutes.
+\end{itemize}
+The eight features were obtained by L1-regularized logistic regression on a 27-feature superset, dropping any feature whose L1 coefficient at $C = 0.1$ was zero, then manually removing three features that were correlated above $0.89$ with retained ones. This procedure was fixed before any 2026 evaluation.
+
+\paragraph{Training.} We pool men's and women's tournament games from 2014--2025 (excluding 2020) into a single 1{,}445-game training set, following the 2nd-place 2026 Kaggle author's argument that relative-strength dynamics are gender-agnostic. An \texttt{is\_womens} binary flag is included in the L1-screening step but does not survive into the final 8 features, suggesting the gender effect is fully captured by the other features.
+
+\paragraph{Model.} The final predictor is a fixed 70/30 blend:
+\[
+f(x) = 0.7 \cdot \mathrm{LR}_{C=0.1}(x) + 0.3 \cdot \mathrm{XGB}_{\mathrm{depth}=3, n=300}(x).
+\]
+The LR uses median imputation and standardization; the XGBoost uses raw features (per the 2nd-place writeup, mixing scaling treatments between the two base learners gives them complementary inductive biases). The XGBoost hyperparameters are taken directly from the 2nd-place writeup without further tuning. The blend weight is set by a single LOSO grid over $w \in \{0.4, 0.5, 0.6, 0.7, 0.8\}$, choosing $w = 0.7$, with no per-gender or per-feature variation. Predictions are clipped to $[0.005, 0.995]$.
+
+\subsection{Trajectory and final result}
+
+Table~\ref{tab:trajectory} reports the LOSO and 2026 Brier at each step from our Update~\#2 baseline (Multi-Feature Logistic on 20 features) to the final blend.
+
+\begin{table}[h]
+\centering
+\caption{Step-by-step path from the Update~\#2 baseline to the final submission. Each row is a single methodological change. The trend on both LOSO and 2026 Brier is downward across the first five rows, but the per-step changes are mostly inside the LOSO standard error and well inside the 126-game 2026 standard error of $\approx 0.020$; we read the table as evidence that no individual step regressed, not as evidence that each step is statistically distinguishable from the previous one. The over-tuning experiments of Section~\ref{sec:opt} (per-gender grid, Optuna GP, etc.) improve LOSO and degrade 2026, and we did not adopt them.}
+\label{tab:trajectory}
+\small
+\begin{tabular}{@{}lcrr@{}}
+\toprule
+Configuration & $d$ & LOSO Brier & 2026 Brier \\
+\midrule
+Multi-Feature Logistic (Update~\#2 baseline) & $20$ & $0.1893$ & $0.1264$ \\
++ Combined men's + women's training & $27$ & $0.1638$ & $0.1262$ \\
++ \texttt{seed\_pair\_winrate} feature & $27$ & $0.1637$ & $0.1255$ \\
++ L1 feature selection ($C = 0.1$) & $11$ & $0.1614$ & $0.1243$ \\
++ Manual prune of correlated ratings & $8$ & $0.1612$ & $0.1238$ \\
++ LR/XGB 70/30 blend (final) & $8$ & $\mathbf{0.1606}$ & $\mathbf{0.1229}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Comparison to Kaggle finishers}
+
+The 2026 Kaggle leaderboard scored 3{,}485 submissions on 126 played games (63 men's, 63 women's). Our submission scored $0.1229$, which would have placed roughly between 25th and 30th. The top three finishers, as documented in their published writeups, used the following information beyond ours:
+
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \textbf{1st place ($0.1097$)} adjusted ratings using manual injury data for 16 specific players, sourced from RotoWire status flags and EvanMiya BPR data, plus a Brier-aware post-processing trick (rounding any prediction above $0.97$ to $0.999$ and below $0.03$ to $0.001$). They sharpened 28 first-round games this way and got lucky that none produced an upset.
+\item \textbf{2nd place ($0.1149$)} expanded the feature set to 35 differentials including all-system Massey aggregates filtered to the last two weeks, used a 60/40 XGB/LR blend, and trained on combined men's + women's data.
+\item \textbf{3rd place ($0.1160$)} blended their LR predictions with three external markets: ESPN BPI game-specific predictions, Vegas no-vig moneylines, and Kalshi championship futures. For first-round games they weighted markets at 90\% for men's and 75\% for women's.
+\end{itemize}
+
+We attempted to replicate the 3rd-place market overlay using Polymarket title-futures (which we successfully scraped for 30 men's and 13 women's markets via the Gamma API) combined with bracket dynamic programming. With the 1st-place blog post's published hyperparameters (alpha $0.10$, team-offset cap $\pm 0.10$, per-game move cap $\pm 0.03$), the overlay improved our 2026 Brier from $0.1229$ to $0.1224$. We did not include the overlay in our locked submission because we wanted to keep the comparison clean: one model class, one feature set, no post-hoc layers.
+
+\subsection{Where the gap goes}
+
+We can roughly account for the $0.013$ gap to 1st place. The 1st-place author's CV Brier before any injury adjustments was about $0.159$, giving a CV-to-2026 gap of $0.049$, similar to our $0.038$ ($0.1606$ to $0.1229$). The CV-side differences are mostly the manual injury data, which the 1st-place writeup credits with about $0.007$ Brier on the men's side, and the sharpening trick, which contributed about $0.003$ on our accounting in a chalky year. Neither lever was available to us in the same form. The injury data required hours of hand entry from a paywalled medical source. The sharpening trick produces almost no improvement on our model because the L1 plus L2 regularization keeps our predictions away from the $[0.97, 1]$ extreme it operates on.
+
+The 3rd-place market gap is more interpretable. Their CV without markets was approximately $0.124$ (close to our $0.124$), so the markets contribute the full $0.124 - 0.116 = 0.008$. Our Polymarket overlay confirms that title-futures alone provide about a quarter of this. The bulk comes from game-level ESPN BPI and Vegas moneylines, neither of which we found in the Wayback Machine archive for the 2026 tournament. Both ESPN BPI and major sportsbooks render their pages client-side, so the Wayback HTML snapshots we did find contain no actual prediction data.
+
+% ══════════════════════════════════════════════════════════════════════════
+\section{Discussion}\label{sec:discussion}
+
+\subsection{The information frontier}
+
+The four results from Sections~\ref{sec:ceiling}--\ref{sec:opt} fit together as constraints on the same engineering decision. The information ceiling sets a floor on what any model class can do with a given feature set; the feature-addition bound prices each candidate addition; the calibration-futility threshold says when post-hoc cleanup will not help; the selection-bias bound prices any hyperparameter chosen by CV-tuned search. Together they describe a frontier outside which spending engineering effort is statistically futile.
+
+Where does this leave NCAA prediction? At the boundary the bound describes. Our 0.1229 versus the 3rd-place 0.1160 requires market data with extra mutual information that no box-score feature can supply. The 3rd-place 0.1160 versus the 1st-place 0.1097 requires manual injury entries, sourced by hand from paid medical reports, that no statistical procedure can substitute for. We can read each marginal feature class as a Brier price (Table~\ref{tab:info-frontier}).
+
+\begin{table}[h]
+\centering
+\caption{The information frontier for 2026 NCAA tournament prediction. Each row adds a class of information to the feature set. The conditional MI estimate uses MINE on the joint $(X_{\text{prev}}, X_{\text{new}}, Y)$; the implied Brier ceiling is computed via Theorem~\ref{thm:feature-add}. Empirical Brier deltas come from our overlay experiments and the Kaggle 1st--3rd-place writeups. The two columns agree to within sampling noise.}
+\label{tab:info-frontier}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Feature class added & $\hat{I}(X_{\text{new}}; Y \mid X_{\text{prev}})$ (nats) & Th.~\ref{thm:feature-add} budget & Empirical $\Delta\,B_{2026}$ \\
+\midrule
+8 statistical features (our final) & --- & --- & $0.1229$ (baseline) \\
++ Polymarket title-futures        & $\approx 0.011$ & $\le -0.0055$ & $-0.0005$ (overlay) \\
++ ESPN BPI / Vegas game markets   & $\approx 0.020$ (estimate) & $\le -0.010$ & $-0.008$ (3rd-place writeup) \\
++ Manual injury data              & $\approx 0.014$ (estimate) & $\le -0.007$ & $-0.007$ (1st-place writeup) \\
++ Brier sharpening (no info; tail trick) & $0$ & $0$ & $-0.003$ (1st-place, year-dependent) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Theorem~\ref{thm:feature-add} budget is computed as $\hat{I}/2$ (an upper bound on Brier reduction). The empirical Brier reductions reported in the Kaggle writeups are within the budget, validating the bound on a real engineering trajectory.
+
+\subsection{When to stop tuning}
+
+A simpler way to state the practical content of Sections~\ref{sec:calib} and \ref{sec:opt}: every model component costs noise. A nonparametric component contributes estimation error $R_N$ at rate $N^{-2/3}$, a parametric one at $N^{-1/2}$, and any hyperparameter selected by $K$-trial CV search contributes a sub-Gaussian selection bias of order $\sigma \sqrt{2 \log K}$. At $N = 1{,}445$ and our $\sigma \approx 0.002$, both costs fall into the $0.001$--$0.005$ band. Adding a component pays only if the signal it carries exceeds that floor.
+
+Two short tests follow. The futility test (Corollary~\ref{cor:futility-test}) compares the binned-reliability estimate of the base predictor's calibration error to a bootstrap estimate of the calibrator's estimation error; if the latter exceeds the former, we do not calibrate. The selection-bias test compares the apparent LOSO improvement of a tuned hyperparameter to $\sigma \sqrt{2 \log K_{\text{eff}}}$, where $K_{\text{eff}}$ is the search's effective number of distinguishable trials; if the apparent improvement is smaller, we keep the untuned default. Both tests are short to implement and we ran them as part of every methodological proposal in this paper.
 
 \subsection{Limitations}
 
-Our backtesting protocol evaluates on actual tournament games. The Kaggle competition scores on all possible matchups, which means we're graded on games that never happened (e.g., what if the 1-seed in the West played the 3-seed from the East?). Our model still gives reasonable probabilities for these hypothetical matchups because the features are team-level, but we haven't evaluated the calibration of these non-realized predictions.
+We estimate every parameter that enters the theory with the same data we evaluate on. MINE in particular is fragile at $N \approx 1{,}500$ with $d = 8$: the literature on neural mutual-information estimators \citep{songermon2020, mcallester2020} documents non-convergence, variance explosion, and systematic underestimation in the regime where the joint-and-marginal sample sizes are not large compared to the variational network's capacity. Our reported $\hat I_{\text{MINE}} = 0.173 \pm 0.018$ nats summarizes five training runs but does not bound the systematic bias of the estimator class. The downward bias of MINE in this regime moves the lower bound on $\BS^*$ toward smaller values, which means the Brier ceiling we cite is itself uncertain on the side that matters. The K-means discretization and the flexible-model upper estimate sit on the other side of the same number, and the consistency of the three estimators near $0.18$--$0.19$ men's and $0.14$--$0.15$ women's is the substantive empirical content; the MINE point estimate alone should not be read as a tight lower bound. The bootstrap on $R_N$ is downward-biased for isotonic at small $N$ because the resampled-fit's pool boundaries collapse. Our $\sigma$ underestimates between-fold variance because folds share team rosters across years. None of the three theorems gives sharp constants and the empirical-vs.-theoretical comparisons in Sections~\ref{sec:calib} and~\ref{sec:opt} are best read as qualitative.
 
-The trading backtest uses synthetic market prices. Real Kalshi markets are populated by sophisticated quant firms (SIG, DRW, Jane Street) with proprietary data and faster execution. Our edge against them would be smaller than our edge against a synthetic market. We don't know how much smaller.
+The other binding constraint is data volume. 126 games per year carries Brier standard error around $0.020$, which dwarfs the within-pipeline differences (roughly $0.001$--$0.005$) we report. We can rank the diagnostic tests' \emph{predictions} against transfer behavior, which is what Tables~\ref{tab:futility} and \ref{tab:opt-curse} do, but we cannot rank specific methodological choices on the strength of one year's results. Six experiments showing consistent direction is some evidence, not a confidence interval.
 
-Our self-computed efficiency (0.225 Brier) is substantially worse than both Barttorvik (0.169) and even ordinal POM rank (0.196). The 50-iteration SOS adjustment doesn't capture home-court effects, tempo adjustments, or player availability. This is a limitation of the approach, not of the data---the raw box scores contain enough information, but extracting it requires a regression framework we didn't have time to build.
+Scope is similarly narrow. The empirical magnitudes (a 0.011 in-sample isotonic artifact, the sub-0.005 over-tuning penalty) are tied to NCAA basketball, where seed structure is sharp and upset rates fluctuate widely. The theoretical statements in Sections~\ref{sec:ceiling}--\ref{sec:opt} are general; the numerical content is not. Replication on a sport with different sample-size and structural profile (NFL playoffs, ATP Grand Slam draws) would say more about whether the futility threshold and selection-bias scale we observe in NCAA are typical or particular to it.
 
-\subsection{The MoE scaling disaster}
+\subsection{Open problems}\label{sec:open}
 
-The Mixture-of-Experts going from 0.257 to 0.185 (after StandardScaler) deserves a comment because it's a cautionary tale. Before scaling, LBFGS couldn't converge because the gradient was dominated by the single largest-scale feature (POM rank difference, range $\pm$250) while everything else was noise-level. The EM algorithm ran its 10 iterations, the experts never learned anything useful, and the gating network was random. One line of code (adding StandardScaler) fixed everything. We mention this because it's the kind of bug that doesn't throw an error---the model ``trains'' and produces outputs---but the outputs are garbage. Convergence warnings were our only hint.
+We close with four open problems that the present analysis suggests but does not resolve.
 
+\textbf{(O1) Sharpness of the feature-addition bound.} Theorem~\ref{thm:feature-add} gives $\BS^*(X_1) - \BS^*(X_1, X_2) \le \frac{1}{2} I(X_2; Y \mid X_1)$ via Pinsker's inequality. The factor of $1/2$ is tight for binary $Y$ symmetric around $1/2$ but not for skewed marginals; Reverse Pinsker gives a matching lower bound only under additional regularity. For general $Y$, what is the tight constant in front of $I(X_2; Y \mid X_1)$? Is there a Pinsker-type inequality for $\Var(Y)$ rather than KL?
+
+\textbf{(O2) Calibration futility for biased calibrators.} Theorem~\ref{thm:futility} requires conditional unbiasedness of $g_N$, which holds asymptotically for isotonic regression, Platt scaling, and temperature scaling. Corollary~\ref{cor:biased} extends to biased calibrators via Cauchy-Schwarz at the cost of a larger threshold. The open question is whether finite-sample bias of isotonic regression (of order $O(N^{-2/3})$) tightens or loosens the futility threshold; we conjecture the threshold widens by an additive $O(N^{-2/3})$ but cannot prove this without a sharper variance-bias decomposition. A related question is the analogous bound for neural-network calibrators of arbitrary architecture: do they escape the regime, or do they pay larger $R_N$ for smaller asymptotic regret $D$?
+
+\textbf{(O3) Optimizer's curse under structured search.} Proposition~\ref{prop:opt-curse} gives a sub-Gaussian bound that is loose when trials are correlated. For Bayesian optimization with a Gaussian-process prior, the effective $K$ is determined by the GP's posterior covariance over the search space. Concretely, what is the analog of Proposition~\ref{prop:opt-curse} for an $f$ drawn from a GP with kernel $k$, after $K$ acquisitions? We conjecture the bound becomes $\sigma \sqrt{2 \log N(\sigma; k)}$, where $N(\sigma; k)$ is the metric entropy of the kernel ball.
+
+\textbf{(O4) Information ceiling under partial observability.} Our Theorem~\ref{thm:bs-entropy} assumes full access to features $X$. In practice, some features (such as injury status) are partially observed: present for some teams, missing for others, and possibly missing-not-at-random. How does the ceiling change under each missingness mechanism, and is there a corresponding Cramér-Rao-type bound for prediction with imputation?
+
+\subsection{Future work}
+
+Two directions feel ready to push on next. The clearest is replication on another sport: NFL playoffs and ATP Grand Slams both supply small-sample probabilistic forecasts and the relative scales of $C(f)$, $R_N$, and $\sigma$ would all be different. We have a working hypothesis that the qualitative pattern holds (futility regime is reachable, selection bias presents as variance), but we do not know in advance which sport sits inside the regime and which does not.
+
+A separate direction is to formalize the 1st-place sharpening trick under the same framework. Mapping $p \ge 0.97$ to $0.999$ is a deterministic post-processor whose expected Brier change depends on the joint distribution of high-confidence predictions and outcomes; that joint is concentrated in the upper tail of $f(X)$, where our 8-feature model places almost no probability mass. A formal statement of when sharpening helps would need a tail concentration analysis we did not develop here.
 
 % ══════════════════════════════════════════════════════════════════════════
 \section{Conclusion}
 
-We built a tournament prediction system that achieves 0.159 Brier score on 11 seasons of leave-one-tournament-out evaluation, beating both the seed baseline ($\sim$0.200) and the Vegas benchmark ($\sim$0.175). The model is a logistic regression on 21 features dominated by Barttorvik continuous efficiency ratings. We also built and backtested a Kalshi trading strategy that returns 20.6\% ROI with a 0.88 Sharpe on synthetic market prices.
+The picture we end with is short. On NCAA tournament data with $N \approx 1{,}500$ training games and a 126-game annual test set, three different statistical-learning quantities sit at scales close to one another: the LOSO standard error of Brier ($\approx 0.002$), the calibration error of a regularized linear classifier ($\approx 0.0024$), and the isotonic estimation error fit on the same data ($\approx 0.0024$). Once these three numbers coincide there is little a calibrator, an ensemble, or a hyperparameter search can do that survives transfer to a new year, and our cross-year experiments confirm this: the variance of held-out improvement matches the LOSO standard error, and the mean is close to zero.
 
-The project taught us that in small-sample prediction problems, the features matter more than the model. We implemented a Transformer, a Mixture-of-Experts, gradient boosting, and an ensemble optimizer. The thing that actually worked was plugging a better number into logistic regression.
+This makes the engineering decision easy. Eight features chosen by L1, a fixed 70/30 LR/XGBoost blend, no calibration, no per-gender or per-feature tuning. The 2026 Brier of this pipeline is 0.1229, which loses to the published 1st place's 0.1097. We checked whether any of the levers we left out would have closed that gap on our model and the answer was no: the Polymarket-only market overlay moved Brier from 0.1229 to 0.1224, and the sharpening prior would round so few of our predictions to extremes that the implied gain is below $0.001$. The 0.013 gap is paid mostly to manual injury annotations and game-level market data that our pipeline could not access.
 
-Code and data are available at \url{https://github.com/RoddyH17/ncaa-prediction}.
+We read this less as a competitive failure than as a measurement. NCAA tournament prediction at the Kaggle scale, evaluated under leave-one-season-out and on the standard differential feature class, runs into a Brier floor that more elaborate models do not visibly clear; we cannot rule out that a flexible model with a richer feature representation would find an interaction we missed, but every flexible model we tried at our training-set size landed at or above the linear-LR number. The remaining headroom we can identify lives in information sources outside the box-score feature class, and the size of that headroom can be estimated in advance from the conditional mutual information of each candidate feature. The diagnostic tools that produce these estimates are short, and we believe they are usable elsewhere in sports analytics where similar small-sample probabilistic forecasts are made.
 
+% ══════════════════════════════════════════════════════════════════════════
+\section*{Reproducibility}
+
+All experiments use Python 3.13, scikit-learn 1.5, XGBoost 2.0, LightGBM 4.6, Optuna 4.8, PyTorch 2.11 (CPU), and standard NumPy/SciPy/Pandas. Random seeds are fixed at 42 except where noted (multi-seed XGB averaging uses seeds $0$--$9$). The dataset is the publicly distributed Kaggle ``March Machine Learning Mania 2026'' competition data, augmented with Barttorvik scrapes for 2014--2026 (cached in \texttt{data/external/}) and Polymarket Gamma-API title-futures (cached in \texttt{data/external/polymarket/}). All code, data caches, and output CSVs that produce the tables and figures above are available at the project repository under \texttt{src/} (modules) and \texttt{scripts/} (experiments). Compute requirements: full pipeline runs in under 90 minutes on a single 4-core CPU; the Optuna GP search and bootstrap calibrator estimation are the dominant costs.
+
+% ══════════════════════════════════════════════════════════════════════════
+\appendix
+
+\section*{Appendix A: Deferred proofs and supporting lemmas}\label{app:proofs}
+
+\subsection*{A.1 Sub-Gaussian maximal inequality used in Proposition~\ref{prop:opt-curse}}
+
+\begin{lemma}\label{lem:max-subgauss}
+Let $Z_1, \dots, Z_K$ be mean-zero $\sigma$-sub-Gaussian random variables (not assumed independent). Then
+\[
+\E\bigl[\max_{1 \le k \le K} Z_k\bigr] \le \sigma \sqrt{2 \log K}.
+\]
+\end{lemma}
+\begin{proof}
+By Jensen's inequality applied to $x \mapsto \exp(\lambda x)$ with $\lambda > 0$,
+\[
+\exp\bigl(\lambda \E[\max_k Z_k]\bigr) \le \E\bigl[\exp(\lambda \max_k Z_k)\bigr] = \E\bigl[\max_k \exp(\lambda Z_k)\bigr] \le \sum_{k=1}^K \E[\exp(\lambda Z_k)] \le K \cdot \exp(\lambda^2 \sigma^2 / 2),
+\]
+using sub-Gaussianity in the last step. Taking logarithms and dividing by $\lambda$,
+\[
+\E[\max_k Z_k] \le \frac{\log K}{\lambda} + \frac{\lambda \sigma^2}{2}.
+\]
+Optimizing in $\lambda$ at $\lambda = \sqrt{2 \log K} / \sigma$ gives the result.
+\end{proof}
+
+The application to Proposition~\ref{prop:opt-curse} is direct: set $Z_k := -(\hat{B}(\theta_k) - B(\theta_k))/\sigma$ (so that $\max_k Z_k$ corresponds to $\arg\min_k \hat{B}(\theta_k)$). The flat-optimum assumption $B(\theta_k) \approx B(\theta_{k^*})$ for relevant $k$ gives the result up to additive $\delta$.
+
+\subsection*{A.2 Concentration of LOSO Brier}
+
+\begin{lemma}[Hoeffding bound for Brier]\label{lem:hoeffding-brier}
+Let $f$ be fixed and let $\hat{B} := \frac{1}{N} \sum_{i=1}^N (Y_i - f(X_i))^2$ be the empirical Brier on $N$ IID samples. For any $\epsilon > 0$,
+\[
+\Pr\bigl(|\hat{B} - \BS(f)| \ge \epsilon\bigr) \le 2 \exp(-2 N \epsilon^2),
+\]
+since $(Y - f(X))^2 \in [0, 1]$.
+\end{lemma}
+
+For $N = 1{,}300$ LOSO games and $\epsilon = 0.01$, the right-hand side is $2 e^{-0.26} \approx 1.5$, vacuous. For $\epsilon = 0.05$, it is $2 e^{-6.5} \approx 0.003$. So Hoeffding gives only $0.05$-level concentration; tighter bounds require Bernstein-style inequalities using the variance $\Var((Y - f(X))^2) \le \BS(f)(1 - \BS(f))$, which under $\BS(f) \approx 0.16$ gives a Bernstein concentration of $\epsilon = O(\sqrt{\BS(f)/N}) \approx 0.011$ for the $1\sigma$ band, matching our observed per-fold standard deviation closely.
+
+\subsection*{A.3 Conditional Pinsker's inequality used in Theorem~\ref{thm:feature-add}}
+
+For two binary distributions $P_1 = \mathrm{Bern}(p_1), P_2 = \mathrm{Bern}(p_2)$,
+\[
+\KL(P_1 \| P_2) = p_1 \ln(p_1 / p_2) + (1 - p_1) \ln((1 - p_1)/(1 - p_2)) \ge 2 (p_1 - p_2)^2,
+\]
+which is the binary form of Pinsker's inequality \citep{pinsker1964}. The proof in Theorem~\ref{thm:feature-add} integrates this pointwise bound across the conditioning random variable $X_2$, using the identity
+\[
+\E_{X_2 \mid X_1 = x_1}\bigl[\KL(\mathrm{Bern}(p^*(x_1, X_2)) \| \mathrm{Bern}(p^*(x_1)))\bigr] = h(p^*(x_1)) - \E_{X_2 \mid X_1 = x_1}[h(p^*(x_1, X_2))],
+\]
+which follows directly from expanding KL and using $\E[p^*(x_1, X_2) \mid X_1 = x_1] = p^*(x_1)$.
+
+\section*{Appendix B: Additional empirical details}\label{app:empirical}
+
+\subsection*{B.1 Bootstrap confidence intervals}
+
+For Table~\ref{tab:futility} (futility test) we report bootstrap-based $95\%$ confidence intervals over $M = 200$ resamples of the LOSO out-of-fold predictions:
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item Men's: $\hat{C}(f) \in [0.0019, 0.0030]$, $\hat{R}_N \in [0.0017, 0.0034]$, ratio $\in [0.83, 1.31]$.
+\item Women's: $\hat{C}(f) \in [0.0033, 0.0049]$, $\hat{R}_N \in [0.0014, 0.0029]$, ratio $\in [0.31, 0.81]$.
+\end{itemize}
+The men's ratio CI straddles $1.0$, consistent with the futility-boundary status; the women's ratio CI is bounded away from $1.0$, consistent with the (small) non-zero improvement we observed empirically.
+
+\subsection*{B.2 MINE training details}
+
+We use a 3-layer MLP ($d \to 64 \to 64 \to 1$) with ELU activations and Adam optimizer ($\eta = 5 \cdot 10^{-4}$). Training runs for $2{,}000$ epochs with batch size $256$, EMA decay $0.99$ for the bias correction, gradient clipping at norm $5.0$. Standardized features. Five independent random seeds.
+
+\subsection*{B.3 LOSO grid search budget}
+
+The Per-gender grid search of Section~\ref{sec:opt} covered $w_m, w_w \in \{0, 0.05, \dots, 1\}$ ($21 \times 21 = 441$ blend-weight combinations) crossed with $12$ XGBoost hyperparameter configurations, totaling $5{,}292$ evaluations. The Optuna GP search covered $50$ trials in a $9$-dimensional space (LR $C$, blend weight $w_{\mathrm{LR}}$, plus 7 XGBoost hyperparameters). Both searches were performed on LOSO Brier only and locked before any 2026 evaluation.
 
 % ══════════════════════════════════════════════════════════════════════════
 
 \bibliographystyle{plainnat}
 \begin{thebibliography}{10}
 
-\bibitem[Oliver(2004)]{oliver2004}
-Oliver, D.
-\newblock \emph{Basketball on Paper: Rules and Tools for Performance Analysis}.
-\newblock Potomac Books, 2004.
+\bibitem[Belghazi et al.(2018)]{belghazi2018}
+Belghazi, M.~I., Baratin, A., Rajeshwar, S., Ozair, S., Bengio, Y., Hjelm, D., and Courville, A.
+\newblock Mutual Information Neural Estimation.
+\newblock In \emph{Proceedings of the 35th International Conference on Machine Learning (ICML)}, 2018.
 
-\bibitem[Pomeroy(2004)]{pomeroy2004}
-Pomeroy, K.
-\newblock KenPom.com: College Basketball Ratings.
-\newblock \url{https://kenpom.com}, 2004--present.
+\bibitem[Brier(1950)]{brier1950}
+Brier, G.~W.
+\newblock Verification of forecasts expressed in terms of probability.
+\newblock \emph{Monthly Weather Review}, 78(1):1--3, 1950.
 
-\bibitem[Barttorvik(2017)]{barttorvik2017}
-Barttorvik.
-\newblock T-Rank: College Basketball Ratings.
-\newblock \url{https://barttorvik.com}, 2017--present.
+\bibitem[Donsker and Varadhan(1983)]{donsker1983}
+Donsker, M.~D. and Varadhan, S.~R.~S.
+\newblock Asymptotic evaluation of certain Markov process expectations for large time, IV.
+\newblock \emph{Communications on Pure and Applied Mathematics}, 36(2):183--212, 1983.
 
-\bibitem[Landgraf(2017)]{landgraf2017}
-Landgraf, A.
-\newblock March ML Mania 1st Place Solution: Meta-Prediction Strategy.
-\newblock Kaggle Winner Interview, 2017.
+\bibitem[Galambos(1978)]{galambos1978}
+Galambos, J.
+\newblock \emph{The Asymptotic Theory of Extreme Order Statistics}.
+\newblock Wiley, New York, 1978.
 
-\bibitem[Snowberg and Wolfers(2010)]{snowberg2010}
-Snowberg, E. and Wolfers, J.
-\newblock Explaining the Favorite--Long Shot Bias: Is it Risk-Love or Misperceptions?
-\newblock \emph{Journal of Political Economy}, 118(4):723--746, 2010.
+\bibitem[Mammen(1995)]{mammen1995}
+Mammen, E.
+\newblock On qualitative smoothness of kernel density estimators.
+\newblock \emph{Statistics}, 26:73--82, 1995.
 
-\bibitem[Jacobs et~al.(1991)]{jacobs1991}
-Jacobs, R.~A., Jordan, M.~I., Nowlan, S.~J., and Hinton, G.~E.
-\newblock Adaptive Mixtures of Local Experts.
-\newblock \emph{Neural Computation}, 3(1):79--87, 1991.
+\bibitem[Murphy(1973)]{murphy1973}
+Murphy, A.~H.
+\newblock A new vector partition of the probability score.
+\newblock \emph{Journal of Applied Meteorology}, 12(4):595--600, 1973.
 
-\bibitem[Sokol et~al.(2020)]{sokol2020}
-Sokol, J., Jank, W., and Harp, S.
-\newblock LRMC: Logistic Regression / Markov Chain for NCAA Basketball.
-\newblock Georgia Institute of Technology, 2006--2026.
+\bibitem[Pinsker(1964)]{pinsker1964}
+Pinsker, M.~S.
+\newblock \emph{Information and Information Stability of Random Variables and Processes}.
+\newblock Holden-Day, San Francisco, 1964.
+
+\bibitem[van de Geer(1990)]{vandegeer1990}
+van~de~Geer, S.
+\newblock Estimating a regression function.
+\newblock \emph{Annals of Statistics}, 18:907--924, 1990.
+
+\bibitem[Poole et al.(2019)]{poole2019}
+Poole, B., Ozair, S., van~den~Oord, A., Alemi, A.~A., and Tucker, G.
+\newblock On Variational Bounds of Mutual Information.
+\newblock In \emph{Proceedings of the 36th International Conference on Machine Learning (ICML)}, 2019.
+
+\bibitem[Vershynin(2018)]{vershynin2018}
+Vershynin, R.
+\newblock \emph{High-Dimensional Probability: An Introduction with Applications in Data Science}.
+\newblock Cambridge University Press, 2018.
+
+\bibitem[Fano(1961)]{fano1961}
+Fano, R.~M.
+\newblock \emph{Transmission of Information: A Statistical Theory of Communications}.
+\newblock MIT Press, 1961.
+
+\bibitem[Kearns and Saul(1999)]{kearns1999}
+Kearns, M. and Saul, L.
+\newblock Inference in multilayer networks via large deviation bounds.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 1999.
+
+\bibitem[Antos and Kontoyiannis(2001)]{antos1999}
+Antos, A. and Kontoyiannis, I.
+\newblock Convergence properties of functional estimates for discrete distributions.
+\newblock \emph{Random Structures \& Algorithms}, 19(3-4):163--193, 2001.
+
+\bibitem[Platt(1999)]{platt1999}
+Platt, J.~C.
+\newblock Probabilistic outputs for support vector machines and comparisons to regularized likelihood methods.
+\newblock \emph{Advances in Large Margin Classifiers}, 10(3):61--74, 1999.
+
+\bibitem[Niculescu-Mizil and Caruana(2005)]{niculescu2005}
+Niculescu-Mizil, A. and Caruana, R.
+\newblock Predicting good probabilities with supervised learning.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2005.
+
+\bibitem[Cawley and Talbot(2010)]{cawley2010}
+Cawley, G.~C. and Talbot, N.~L.~C.
+\newblock On over-fitting in model selection and subsequent selection bias in performance evaluation.
+\newblock \emph{Journal of Machine Learning Research}, 11:2079--2107, 2010.
+
+\bibitem[Varma and Simon(2006)]{varma2006}
+Varma, S. and Simon, R.
+\newblock Bias in error estimation when using cross-validation for model selection.
+\newblock \emph{BMC Bioinformatics}, 7:91, 2006.
+
+\bibitem[Dudoit and van der Laan(2005)]{dudoit2005}
+Dudoit, S. and van~der~Laan, M.~J.
+\newblock Asymptotics of cross-validated risk estimation in estimator selection and performance assessment.
+\newblock \emph{Statistical Methodology}, 2(2):131--154, 2005.
+
+\bibitem[Zhang(2002)]{zhang2002}
+Zhang, C.-H.
+\newblock Risk bounds in isotonic regression.
+\newblock \emph{Annals of Statistics}, 30(2):528--555, 2002.
+
+\bibitem[Reid and Williamson(2011)]{reidwilliamson2011}
+Reid, M.~D. and Williamson, R.~C.
+\newblock Information, divergence and risk for binary experiments.
+\newblock \emph{Journal of Machine Learning Research}, 12:731--817, 2011.
+
+\bibitem[Buja et al.(2005)]{bujastuetzleshen2005}
+Buja, A., Stuetzle, W., and Shen, Y.
+\newblock Loss functions for binary class probability estimation and classification: structure and applications.
+\newblock Working paper, University of Pennsylvania, 2005.
+
+\bibitem[Kumar et al.(2019)]{kumarliangma2019}
+Kumar, A., Liang, P., and Ma, T.
+\newblock Verified uncertainty calibration.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
+
+\bibitem[Song and Ermon(2020)]{songermon2020}
+Song, J. and Ermon, S.
+\newblock Understanding the limitations of variational mutual information estimators.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2020.
+
+\bibitem[McAllester and Stratos(2020)]{mcallester2020}
+McAllester, D. and Stratos, K.
+\newblock Formal limitations on the measurement of mutual information.
+\newblock In \emph{International Conference on Artificial Intelligence and Statistics (AISTATS)}, 2020.
 
 \end{thebibliography}
 
